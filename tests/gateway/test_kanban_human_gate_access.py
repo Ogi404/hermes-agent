@@ -59,7 +59,8 @@ async def test_non_admin_gate_mutation_is_denied_before_dispatch(monkeypatch, ac
 
 @pytest.mark.asyncio
 async def test_admin_gate_decision_succeeds_through_gateway_and_binds_actor(kanban_home):
-    with kbc.connect() as conn:
+    kb.create_board("hermes-agent")
+    with kbc.connect(board="hermes-agent") as conn:
         tid = kb.create_task(conn, title="Reviewed change", assignee="builder")
         gate.request_gate(
             conn, tid, stage="ready", sha=SHA, pr_url=PR,
@@ -69,11 +70,14 @@ async def test_admin_gate_decision_succeeds_through_gateway_and_binds_actor(kanb
 
     out = await GatewaySlashCommandsMixin._handle_kanban_command(
         _runner(True),
-        _event(f"/kanban gate-decide {tid} ready approve --sha {SHA}", "U_OWNER"),
+        _event(
+            f"/kanban --board hermes-agent gate-decide {tid} ready approve --sha {SHA}",
+            "U_OWNER",
+        ),
     )
 
     assert "Recorded approve" in out
-    with kbc.connect() as conn:
+    with kbc.connect(board="hermes-agent") as conn:
         decision = gate.latest_gate(conn, tid, "ready")["decision"]
     assert decision["actor"] == "U_OWNER"
     assert decision["platform"] == "slack"

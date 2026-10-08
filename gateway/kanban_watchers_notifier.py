@@ -474,7 +474,11 @@ def _fmt_gate_requested(ev, n) -> tuple:
     pr_url = _safe_review_reason(payload.get("pr_url"), 300)
     tests = _safe_review_reason(payload.get("tests"), 600)
     verdict = _safe_review_reason(payload.get("reviewer_verdict"), 80)
-    command = f"/kanban gate-decide {n.task_id} {stage.lower()} approve --sha {sha}"
+    board = _safe_review_reason(getattr(n, "board_slug", ""), 80)
+    if not board:
+        return (f"{n.head} Human {stage} gate could not be routed safely: board identity is missing.",
+                None, None)
+    command = f"/kanban --board {board} gate-decide {n.task_id} {stage.lower()} approve --sha {sha}"
     pr_line = f"PR: {pr_url}\n" if pr_url else ""
     msg = (f"{n.head} Human {stage} gate requested for *{n.title}*\n"
            f"Exact SHA: `{sha}`\n{pr_line}Reviewer: {verdict}\nTests: {tests}\n"

@@ -163,10 +163,29 @@ def test_gate_notification_contains_exact_command_without_waking_llm():
         "stage": "ready", "sha": SHA_A, "pr_url": PR,
         "tests": "132 passed", "reviewer_verdict": "APPROVE",
     })
-    notice = SimpleNamespace(head="[board/task]", title="Reviewed change", task_id="t_123")
+    notice = SimpleNamespace(
+        head="[board/task]", title="Reviewed change", task_id="t_123",
+        board_slug="hermes-agent",
+    )
     msg, handoff, detail = notifier._fmt_gate_requested(ev, notice)
     assert SHA_A in msg
     assert PR in msg
-    assert f"/kanban gate-decide t_123 ready approve --sha {SHA_A}" in msg
+    assert f"/kanban --board hermes-agent gate-decide t_123 ready approve --sha {SHA_A}" in msg
     assert handoff is None and detail is None
     assert "gate_requested" not in notifier._WAKE_KINDS
+
+
+def test_gate_notification_fails_closed_without_board_identity():
+    from gateway import kanban_watchers_notifier as notifier
+
+    ev = SimpleNamespace(kind="gate_requested", payload={
+        "stage": "ready", "sha": SHA_A, "pr_url": PR,
+        "tests": "132 passed", "reviewer_verdict": "APPROVE",
+    })
+    notice = SimpleNamespace(head="[task]", title="Reviewed change", task_id="t_123")
+
+    msg, handoff, detail = notifier._fmt_gate_requested(ev, notice)
+
+    assert "could not be routed safely" in msg
+    assert "/kanban" not in msg
+    assert handoff is None and detail is None
