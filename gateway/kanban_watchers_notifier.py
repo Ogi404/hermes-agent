@@ -44,7 +44,7 @@ def _pin_first():
 # "status" covers dashboard drag-drop and `_set_status_direct()`.
 # ``review_requested`` wakes the origin like a block but is not one;
 # the task is not archived so later review cycles keep notifying.
-TERMINAL_KINDS = ("completed", "blocked", "gave_up", "crashed", "timed_out", "status", "archived", "unblocked", "block_loop_detected", "review_requested", "changes_requested")
+TERMINAL_KINDS = ("completed", "blocked", "gave_up", "crashed", "timed_out", "status", "archived", "unblocked", "block_loop_detected", "review_requested", "changes_requested", "gate_requested", "gate_decided")
 # Kinds that hand a decision back to the origin, which must take a turn.
 # status/archived/unblocked are bookkeeping.
 _WAKE_KINDS = ("completed", "gave_up", "crashed", "timed_out", "blocked", "review_requested", "changes_requested", "block_loop_detected")
@@ -467,6 +467,33 @@ def _fmt_timed_out(ev, n) -> tuple:
     return t("gateway.kanban.ping.timed_out", head=n.head, span=span), None, None
 
 
+def _fmt_gate_requested(ev, n) -> tuple:
+    payload = ev.payload or {}
+    stage = _safe_review_reason(payload.get("stage"), 20).upper()
+    sha = _safe_review_reason(payload.get("sha"), 40)
+    pr_url = _safe_review_reason(payload.get("pr_url"), 300)
+    tests = _safe_review_reason(payload.get("tests"), 600)
+    verdict = _safe_review_reason(payload.get("reviewer_verdict"), 80)
+    command = f"/kanban gate-decide {n.task_id} {stage.lower()} approve --sha {sha}"
+    pr_line = f"PR: {pr_url}\n" if pr_url else ""
+    msg = (f"{n.head} Human {stage} gate requested for *{n.title}*\n"
+           f"Exact SHA: `{sha}`\n{pr_line}Reviewer: {verdict}\nTests: {tests}\n"
+           f"Approve: `{command}`\n"
+           f"Hold/reject: replace `approve` with `hold` or `reject`.")
+    return msg, None, None
+
+
+def _fmt_gate_decided(ev, n) -> tuple:
+    payload = ev.payload or {}
+    stage = _safe_review_reason(payload.get("stage"), 20).upper()
+    decision = _safe_review_reason(payload.get("decision"), 20).upper()
+    sha = _safe_review_reason(payload.get("sha"), 40)
+    actor = _safe_review_reason(payload.get("actor"), 120)
+    platform = _safe_review_reason(payload.get("platform"), 40)
+    return (f"{n.head} Human {stage} gate: *{decision}*\n"
+            f"Exact SHA: `{sha}`\nActor: {actor} via {platform}", None, None)
+
+
 # archived / unblocked are claimed (so the cursor advances past them) but
 # intentionally silent (no formatter), and excluded from _WAKE_KINDS so they
 # never wake the creator.
@@ -483,6 +510,8 @@ _EVENT_FORMATTERS: dict[str, Callable[[Any, _KanbanNotification], tuple]] = {
     "review_requested": _fmt_review_requested,
     "changes_requested": _fmt_changes_requested,
     "block_loop_detected": _fmt_block_loop_detected,
+    "gate_requested": _fmt_gate_requested,
+    "gate_decided": _fmt_gate_decided,
 }
 
 
