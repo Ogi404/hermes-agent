@@ -428,6 +428,50 @@ def test_terminal_provider_exit_blocks_after_one_attempt_in_either_lane(kanban_h
         assert kb.get_task(conn, tid).status == "blocked"
 
 
+def test_dependency_environment_failure_retries_once_then_blocks(kanban_home, monkeypatch):
+    """The selected-runtime launcher fault gets one infrastructure retry, then
+    becomes a sticky operator-visible circuit break regardless of max_retries."""
+    import hermes_cli.kanban_db as _kb
+    from hermes_cli import kanban_db_dispatch as _kbd
+
+    monkeypatch.setattr(_kb, "_pid_alive", lambda _pid: False)
+    monkeypatch.setenv("HERMES_KANBAN_CRASH_GRACE_SECONDS", "0")
+    monkeypatch.setattr(
+        _kbd,
+        "_worker_final_output",
+        lambda *_args, **_kwargs: "refused: no dependency environment is committed for this install",
+    )
+
+    with kbc.connect() as conn:
+        host = _kb._claimer_id().split(":", 1)[0]
+        tid = kb.create_task(conn, title="runtime", assignee="a", max_retries=1)
+
+        for attempt in range(2):
+            pid = 72000 + attempt
+            assert kb.claim_task(conn, tid, claimer=f"{host}:w{attempt}") is not None
+            conn.execute("UPDATE tasks SET worker_pid=? WHERE id=?", (pid, tid))
+            conn.commit()
+            _kbd._record_worker_exit(pid, _exited_status(1))
+            assert tid in kbd.detect_crashed_workers(conn)
+
+            task = kb.get_task(conn, tid)
+            if attempt == 0:
+                assert task.status == "ready"
+                assert task.consecutive_failures == 0
+            else:
+                assert task.status == "blocked"
+                assert task.consecutive_failures == 1
+
+        gave_up = conn.execute(
+            "SELECT payload FROM task_events WHERE task_id=? AND kind='gave_up' ORDER BY id DESC",
+            (tid,),
+        ).fetchone()
+        payload = json.loads(gave_up["payload"])
+        assert payload["dependency_environment"] is True
+        assert payload["dependency_environment_failures"] == 2
+        assert payload["sticky"] is True
+
+
 
 
 def test_respawn_guard_defers_rate_limited_within_cooldown(

@@ -36,6 +36,11 @@ if TYPE_CHECKING:
 # dispatcher parks the task in ``blocked`` with a reason — prevents retry storms.
 DEFAULT_FAILURE_LIMIT = 2
 
+# A selected/install-managed runtime can occasionally be unavailable while a
+# worker is launched. Give this host-infrastructure signature exactly one
+# automatic retry, then park the card for an operator instead of looping.
+DEPENDENCY_ENVIRONMENT_FAILURE = "no dependency environment is committed for this install"
+
 # Worker log files larger than this at spawn time are rotated.
 DEFAULT_LOG_ROTATE_BYTES = 2 * 1024 * 1024   # 2 MiB
 DEFAULT_LOG_BACKUP_COUNT = 1
@@ -1233,7 +1238,44 @@ def _account_crashes(conn: sqlite3.Connection, crash_details: list) -> list[str]
         fp_counts[fp] = fp_counts.get(fp, 0) + 1
     for tid, pid, claimer, dead in crash_details:
         error_text = dead.error_text
-        if dead.protocol_violation:
+        if DEPENDENCY_ENVIRONMENT_FAILURE in error_text.casefold():
+            rows = conn.execute(
+                "SELECT error FROM task_runs WHERE task_id = ? AND outcome = 'crashed' "
+                "ORDER BY id DESC LIMIT 2",
+                (tid,),
+            ).fetchall()
+            signature_streak = 0
+            for row in rows:
+                if DEPENDENCY_ENVIRONMENT_FAILURE not in str(row["error"] or "").casefold():
+                    break
+                signature_streak += 1
+            if signature_streak < 2:
+                # The task itself did not fail: this is a launcher/runtime
+                # infrastructure fault. Preserve its ordinary retry budget.
+                tripped = _record_task_failure(
+                    conn, tid,
+                    error=error_text,
+                    outcome="crashed",
+                    release_claim=False,
+                    end_run=False,
+                    infrastructure=True,
+                )
+            else:
+                tripped = _record_task_failure(
+                    conn, tid,
+                    error=error_text,
+                    outcome="crashed",
+                    force_trip=True,
+                    release_claim=False,
+                    end_run=False,
+                    event_payload_extra={
+                        "pid": pid,
+                        "claimer": claimer,
+                        "dependency_environment": True,
+                        "dependency_environment_failures": signature_streak,
+                    },
+                )
+        elif dead.protocol_violation:
             streak = _protocol_violation_streak(conn, tid)
             trow = conn.execute("SELECT max_retries FROM tasks WHERE id = ?", (tid,)).fetchone()
             if trow is None:
@@ -2034,7 +2076,7 @@ def _reject_guarded_contract(
     conn: sqlite3.Connection,
     task_id: str,
     reason: str,
-    result: "DispatchResult",
+    result: DispatchResult,
     *,
     lane: str,
     dry_run: bool,
