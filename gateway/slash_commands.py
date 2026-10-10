@@ -358,8 +358,14 @@ class GatewaySlashCommandsMixin(
             else:
                 action = tok
                 break
+        if action in {"gate-request", "gate-decide"} and not self._resume_caller_is_admin(event.source):
+            return "Human-gate mutations require an explicitly configured gateway administrator."
+        platform = getattr(event.source.platform, "value", event.source.platform)
         try:
-            output = await asyncio.to_thread(run_slash, text)
+            output = await asyncio.to_thread(
+                run_slash, text, actor=event.source.user_id,
+                actor_platform=str(platform or "gateway"),
+            )
         except Exception as exc:  # pragma: no cover - defensive
             return t("gateway.kanban.error_prefix", error=exc)
 
