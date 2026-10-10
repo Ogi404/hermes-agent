@@ -65,3 +65,20 @@ def test_unlinked_task_unchanged(kanban_conn):
     assert task.branch_name is None
 
 
+def test_unknown_project_fails_closed_without_creating_task(kanban_conn):
+    with pytest.raises(ValueError, match="unknown project.*refusing scratch fallback"):
+        kb.create_task(kanban_conn, title="must not drift", project_id="missing-project")
+
+    assert kb.list_tasks(kanban_conn) == []
+
+
+def test_project_registry_failure_fails_closed_without_creating_task(kanban_conn, monkeypatch):
+    def _offline_registry():
+        raise OSError("offline")
+
+    monkeypatch.setattr(pdb, "connect_closing", _offline_registry)
+    with pytest.raises(ValueError, match="project registry unavailable.*refusing scratch fallback"):
+        kb.create_task(kanban_conn, title="must not drift", project_id="game-library")
+
+    assert kb.list_tasks(kanban_conn) == []
+

@@ -1071,10 +1071,12 @@ def _resolve_project_link(
     from hermes_cli import projects_db as _pdb
 
     project_repo: Optional[str] = None
+    lookup_error: Optional[Exception] = None
     try:
         with _pdb.connect_closing() as _pconn:
             project_obj = _pdb.get_project(_pconn, project_id)
-    except Exception:
+    except Exception as exc:
+        lookup_error = exc
         project_obj = None
     if project_obj is None and project_source_task_id:
         project_obj, project_repo = _project_from_source_task(
@@ -1083,9 +1085,11 @@ def _resolve_project_link(
         if project_obj is not None and workspace_kind == "scratch":
             workspace_kind = "worktree"
     if project_obj is None:
-        # Unresolvable id/slug: drop the link (never a dangling reference,
-        # never a crash) and create an ordinary scratch task.
-        return None, None, None, workspace_kind
+        # A caller that supplied a project asked for repository-scoped work.
+        # Silently degrading to scratch can execute in the wrong checkout, so
+        # fail closed whether the slug is unknown or the registry is unavailable.
+        detail = "project registry unavailable" if lookup_error is not None else "unknown project"
+        raise ValueError(f"{detail}: {project_id!r}; refusing scratch fallback") from lookup_error
     # Canonicalise (a slug may have been passed) and anchor the worktree
     # under the project's primary repo.
     if workspace_kind == "scratch" and project_obj.primary_path:
