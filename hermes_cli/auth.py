@@ -946,30 +946,9 @@ def is_runtime_provider_routable(provider_id: str) -> bool:
 
 
 def read_credential_pool(provider_id: Optional[str] = None) -> dict[str, Any]:
-    """Return the persisted credential pool, or one provider slice.
+    from hermes_cli.auth_profile_fallback import read_credential_pool as _read
 
-    In profile mode the global-root ``auth.json`` is a read-only fallback applied per provider ONLY
-    when the profile has zero entries for it (``hermes auth add`` in the profile shadows global)."""
-    pool = _load_auth_store().get("credential_pool")
-    pool = pool if isinstance(pool, dict) else {}
-    global_pool = _load_global_auth_store().get("credential_pool")
-    global_pool = global_pool if isinstance(global_pool, dict) else {}
-
-    if provider_id is None:
-        merged = dict(pool)
-        for gp_key, gp_entries in global_pool.items():
-            existing = merged.get(gp_key)
-            if not (isinstance(gp_entries, list) and gp_entries):
-                continue
-            if not (isinstance(existing, list) and existing):  # profile wins when it has ANY entries
-                merged[gp_key] = list(gp_entries)
-        return merged
-
-    provider_entries = pool.get(provider_id)
-    if isinstance(provider_entries, list) and provider_entries:
-        return list(provider_entries)
-    global_entries = global_pool.get(provider_id)
-    return list(global_entries) if isinstance(global_entries, list) else []
+    return _read(provider_id)
 
 
 _POOL_STATUS_FIELDS = (
