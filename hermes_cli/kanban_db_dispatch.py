@@ -1809,7 +1809,7 @@ def dispatch_profile_allowlist_summary() -> str:
 
 def _has_spawnable(conn: sqlite3.Connection, status: str) -> bool:
     rows = conn.execute(
-        "SELECT id, title, body, assignee, created_by, project_id, idempotency_key, "
+        "SELECT id, title, body, status, assignee, created_by, project_id, idempotency_key, "
         "workspace_kind, workspace_path, branch_name FROM tasks "
         "WHERE status = ? AND assignee IS NOT NULL AND claim_lock IS NULL",
         (status,),
@@ -1821,7 +1821,8 @@ def _has_spawnable(conn: sqlite3.Connection, status: str) -> bool:
         # Can't introspect — assume spawnable, preserve legacy behavior.
         return True
     return any(
-        profile_exists(row["assignee"]) and fleet_contract_guard_reason(row) is None
+        profile_exists(row["assignee"])
+        and fleet_contract_guard_reason(row, dispatch_lane=status) is None
         for row in rows
     )
 
@@ -2122,7 +2123,7 @@ def _dispatch_lane_task(
     skip is recorded on ``result``.
     """
     task_id = row["id"]
-    contract_reason = fleet_contract_guard_reason(row)
+    contract_reason = fleet_contract_guard_reason(row, dispatch_lane=lane)
     if contract_reason is not None:
         return _reject_guarded_contract(
             conn, task_id, contract_reason, result, lane=lane, dry_run=dry_run,
@@ -2186,7 +2187,9 @@ def _dispatch_lane_task(
             conn,
             task_id,
             ttl_seconds=ttl_seconds,
-            guard=fleet_contract_guard_reason,
+            guard=lambda claimed_row: fleet_contract_guard_reason(
+                claimed_row, dispatch_lane=lane,
+            ),
         )
     except _kb.ClaimGuardRejected as exc:
         # Selection is advisory.  This is the authoritative validation of the
@@ -2367,7 +2370,7 @@ def _tick_spawn_budget(
 def _lane_rows(conn: sqlite3.Connection, status: str) -> list[sqlite3.Row]:
     """Unclaimed rows of one lane in dispatch order."""
     return conn.execute(
-        "SELECT id, title, body, assignee, created_by, project_id, idempotency_key, "
+        "SELECT id, title, body, status, assignee, created_by, project_id, idempotency_key, "
         "workspace_kind, workspace_path, branch_name FROM tasks "
         f"WHERE status = '{status}' AND claim_lock IS NULL "
         "ORDER BY priority DESC, created_at ASC"
