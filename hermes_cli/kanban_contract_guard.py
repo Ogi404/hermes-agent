@@ -19,7 +19,9 @@ FLEET_IDEMPOTENCY_PREFIX = "linear:"
 CONTRACT_BEGIN = "<!-- FLEET_CONTRACT_SNAPSHOT_V1 BEGIN -->"
 CONTRACT_END = "<!-- FLEET_CONTRACT_SNAPSHOT_V1 END -->"
 CONTRACT_SCHEMA_VERSION = 1
+ROLE_CONTRACT_SCHEMA_VERSION = 2
 VALID_EXECUTION_MODES = {"plan_only", "implement"}
+VALID_TASK_LANES = {"orchestration", "implementation", "review"}
 
 CONTRACT_HASH_FIELDS = (
     "schema_version",
@@ -45,6 +47,24 @@ CONTRACT_FIELDS = set(CONTRACT_HASH_FIELDS) | {
     "fetched_at",
 }
 
+ROLE_PROFILE_FIELDS = (
+    "control_plane_profiles",
+    "orchestration_profiles",
+    "implementation_profiles",
+    "review_profiles",
+)
+ROLE_CONTRACT_HASH_FIELDS = CONTRACT_HASH_FIELDS + (
+    "task_lane",
+    *ROLE_PROFILE_FIELDS,
+)
+ROLE_CONTRACT_FIELDS = set(ROLE_CONTRACT_HASH_FIELDS) | {
+    "status",
+    "url",
+    "source_updated_at",
+    "contract_sha256",
+    "fetched_at",
+}
+
 
 def _value(row: Mapping[str, Any], key: str) -> Any:
     try:
@@ -62,7 +82,12 @@ def _is_sorted_unique_strings(value: Any) -> bool:
 
 
 def _contract_hash(contract: Mapping[str, Any]) -> str:
-    payload = {key: contract[key] for key in CONTRACT_HASH_FIELDS}
+    hash_fields = (
+        ROLE_CONTRACT_HASH_FIELDS
+        if contract.get("schema_version") == ROLE_CONTRACT_SCHEMA_VERSION
+        else CONTRACT_HASH_FIELDS
+    )
+    payload = {key: contract[key] for key in hash_fields}
     canonical = json.dumps(
         payload,
         ensure_ascii=False,
@@ -140,7 +165,9 @@ def _linked_project_slug(project_id: str) -> Optional[str]:
     return project.slug if project is not None else None
 
 
-def _fleet_contract_guard_reason(row: Mapping[str, Any]) -> Optional[str]:
+def _fleet_contract_guard_reason(
+    row: Mapping[str, Any], *, dispatch_lane: Optional[str] = None,
+) -> Optional[str]:
     """Return a stable rejection code, or ``None`` when dispatch may proceed.
 
     A row is fleet-governed when either provenance marker is present. Requiring
@@ -160,9 +187,15 @@ def _fleet_contract_guard_reason(row: Mapping[str, Any]) -> Optional[str]:
     if error:
         return error
     assert contract is not None
-    if set(contract) != CONTRACT_FIELDS:
+    schema_version = contract.get("schema_version")
+    expected_fields = (
+        ROLE_CONTRACT_FIELDS
+        if schema_version == ROLE_CONTRACT_SCHEMA_VERSION
+        else CONTRACT_FIELDS
+    )
+    if set(contract) != expected_fields:
         return "snapshot_fields_invalid"
-    if contract.get("schema_version") != CONTRACT_SCHEMA_VERSION:
+    if schema_version not in {CONTRACT_SCHEMA_VERSION, ROLE_CONTRACT_SCHEMA_VERSION}:
         return "snapshot_schema_unsupported"
 
     for key in (
@@ -193,6 +226,24 @@ def _fleet_contract_guard_reason(row: Mapping[str, Any]) -> Optional[str]:
     if contract["redactions"]:
         return "snapshot_redacted"
 
+    if schema_version == ROLE_CONTRACT_SCHEMA_VERSION:
+        task_lane = contract.get("task_lane")
+        if not isinstance(task_lane, str) or task_lane not in VALID_TASK_LANES:
+            return "snapshot_task_lane_invalid"
+        role_memberships: dict[str, list[str]] = {}
+        for key in ROLE_PROFILE_FIELDS:
+            profiles = contract.get(key)
+            if not _is_sorted_unique_strings(profiles) or not profiles:
+                return "snapshot_role_permissions_invalid"
+            role_memberships[key] = profiles
+        all_profiles = [
+            profile
+            for profiles in role_memberships.values()
+            for profile in profiles
+        ]
+        if len(all_profiles) != len(set(all_profiles)):
+            return "snapshot_role_permissions_invalid"
+
     digest = contract.get("contract_sha256")
     if not isinstance(digest, str) or re.fullmatch(r"[0-9a-f]{64}", digest) is None:
         return "snapshot_hash_invalid"
@@ -209,6 +260,22 @@ def _fleet_contract_guard_reason(row: Mapping[str, Any]) -> Optional[str]:
     expected_title = f"{contract['issue_id']}: {contract['title']}"
     if _value(row, "title") != expected_title:
         return "task_title_mismatch"
+
+    if schema_version == ROLE_CONTRACT_SCHEMA_VERSION:
+        assignee = _value(row, "assignee")
+        task_status = _value(row, "status")
+        effective_lane = (
+            "review"
+            if dispatch_lane == "review" or (dispatch_lane is None and task_status == "review")
+            else contract["task_lane"]
+        )
+        allowed_profiles = contract[f"{effective_lane}_profiles"]
+        if (
+            not isinstance(assignee, str)
+            or assignee in contract["control_plane_profiles"]
+            or assignee not in allowed_profiles
+        ):
+            return "project_role_permission_forbidden"
 
     project_id = _value(row, "project_id")
     if not isinstance(project_id, str) or not project_id.strip():
@@ -233,7 +300,9 @@ def _fleet_contract_guard_reason(row: Mapping[str, Any]) -> Optional[str]:
     return None
 
 
-def fleet_contract_guard_reason(row: Mapping[str, Any]) -> Optional[str]:
+def fleet_contract_guard_reason(
+    row: Mapping[str, Any], *, dispatch_lane: Optional[str] = None,
+) -> Optional[str]:
     """Return a stable rejection code, never an exception, for any task row.
 
     Fleet task bodies are external input.  A malformed JSON shape, marker
@@ -241,6 +310,6 @@ def fleet_contract_guard_reason(row: Mapping[str, Any]) -> Optional[str]:
     not prevent unrelated ready/review work from progressing.
     """
     try:
-        return _fleet_contract_guard_reason(row)
+        return _fleet_contract_guard_reason(row, dispatch_lane=dispatch_lane)
     except Exception:
         return "snapshot_invalid"

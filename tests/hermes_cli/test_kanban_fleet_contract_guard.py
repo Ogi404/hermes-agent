@@ -13,7 +13,12 @@ from hermes_cli import kanban_db as kb
 from hermes_cli import kanban_db_connect as kbc
 from hermes_cli import kanban_db_dispatch as kbd
 from hermes_cli import projects_db as pdb
-from hermes_cli.kanban_contract_guard import CONTRACT_BEGIN, CONTRACT_END, CONTRACT_HASH_FIELDS
+from hermes_cli.kanban_contract_guard import (
+    CONTRACT_BEGIN,
+    CONTRACT_END,
+    CONTRACT_HASH_FIELDS,
+    ROLE_CONTRACT_HASH_FIELDS,
+)
 
 
 @pytest.fixture
@@ -62,6 +67,27 @@ def _contract(**changes):
     }
     contract.update(changes)
     contract["contract_sha256"] = _hash(contract)
+    return contract
+
+
+def _role_contract(**changes):
+    contract = _contract()
+    contract.update(
+        schema_version=2,
+        task_lane="implementation",
+        control_plane_profiles=["default"],
+        orchestration_profiles=["director"],
+        implementation_profiles=["builder"],
+        review_profiles=["reviewer"],
+    )
+    contract.update(changes)
+    canonical = json.dumps(
+        {key: contract[key] for key in ROLE_CONTRACT_HASH_FIELDS},
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    contract["contract_sha256"] = hashlib.sha256(canonical).hexdigest()
     return contract
 
 
@@ -221,6 +247,138 @@ def test_malformed_contract_isolated_while_sibling_progresses(
     assert malformed.status == "blocked"
 
 
+@pytest.mark.parametrize(
+    ("kanban_lane", "task_lane", "invalid_profile", "valid_profile"),
+    [
+        ("ready", "orchestration", "default", "director"),
+        ("ready", "implementation", "default", "builder"),
+        ("review", "implementation", "default", "reviewer"),
+        ("ready", "implementation", "director", "builder"),
+        ("review", "orchestration", "director", "reviewer"),
+        ("review", "implementation", "builder", "reviewer"),
+        ("ready", "implementation", "reviewer", "builder"),
+    ],
+)
+def test_role_lane_rejection_does_not_strand_valid_sibling(
+    fleet_home,
+    all_assignees_spawnable,
+    monkeypatch,
+    kanban_lane,
+    task_lane,
+    invalid_profile,
+    valid_profile,
+):
+    home, project_id = fleet_home
+    invalid_contract = _role_contract(task_lane=task_lane)
+    valid_contract = _role_contract(
+        issue_id="ENS-9",
+        linear_id="linear-uuid-9",
+        title="Valid role sibling",
+        task_lane=task_lane,
+    )
+    spawned = []
+    monkeypatch.setattr(
+        kbd._kbw,
+        "_resolve_worktree_workspace",
+        lambda task, **_kwargs: (home / "worktrees" / task.id, task.branch_name),
+    )
+
+    with kbc.connect() as conn:
+        invalid_id = _create_fleet_task(
+            conn,
+            project_id,
+            invalid_contract,
+            assignee=invalid_profile,
+            priority=10,
+        )
+        valid_id = _create_fleet_task(
+            conn,
+            project_id,
+            valid_contract,
+            assignee=valid_profile,
+            priority=1,
+        )
+        if kanban_lane == "review":
+            with kb.write_txn(conn):
+                conn.execute(
+                    "UPDATE tasks SET status = 'review' WHERE id IN (?, ?)",
+                    (invalid_id, valid_id),
+                )
+
+        result = kbd.dispatch_once(
+            conn,
+            spawn_fn=lambda task, _workspace: spawned.append(task.id),
+        )
+        invalid_task = kb.get_task(conn, invalid_id)
+        invalid_active_runs = conn.execute(
+            "SELECT COUNT(*) FROM task_runs "
+            "WHERE task_id = ? AND (ended_at IS NULL OR status = 'running')",
+            (invalid_id,),
+        ).fetchone()[0]
+
+    assert result.contract_guarded[0] == (
+        invalid_id,
+        "project_role_permission_forbidden",
+    )
+    assert spawned == [valid_id]
+    assert invalid_task.status == "blocked"
+    assert invalid_task.claim_lock is None
+    assert invalid_task.current_run_id is None
+    assert invalid_active_runs == 0
+
+
+@pytest.mark.parametrize(
+    ("changes", "reason"),
+    [
+        ({"task_lane": "publishing"}, "snapshot_task_lane_invalid"),
+        (
+            {"implementation_profiles": ["builder", "director"]},
+            "snapshot_role_permissions_invalid",
+        ),
+        (
+            {"implementation_profiles": ["builder", "builder"]},
+            "snapshot_role_permissions_invalid",
+        ),
+        ({"review_profiles": []}, "snapshot_role_permissions_invalid"),
+    ],
+)
+def test_role_contract_rejects_invalid_permission_schema(
+    fleet_home,
+    all_assignees_spawnable,
+    changes,
+    reason,
+):
+    _home, project_id = fleet_home
+    contract = _role_contract(**changes)
+    with kbc.connect() as conn:
+        task_id = _create_fleet_task(conn, project_id, contract)
+        result = kbd.dispatch_once(
+            conn,
+            spawn_fn=lambda *_args: pytest.fail("invalid permissions must not spawn"),
+        )
+        task = kb.get_task(conn, task_id)
+    assert result.contract_guarded == [(task_id, reason)]
+    assert task.status == "blocked"
+
+
+def test_role_contract_requires_every_permission_field(
+    fleet_home,
+    all_assignees_spawnable,
+):
+    _home, project_id = fleet_home
+    contract = _role_contract()
+    contract.pop("review_profiles")
+    with kbc.connect() as conn:
+        task_id = _create_fleet_task(conn, project_id, contract)
+        result = kbd.dispatch_once(
+            conn,
+            spawn_fn=lambda *_args: pytest.fail("incomplete permissions must not spawn"),
+        )
+        task = kb.get_task(conn, task_id)
+    assert result.contract_guarded == [(task_id, "snapshot_fields_invalid")]
+    assert task.status == "blocked"
+
+
 @pytest.mark.parametrize("lane", ["ready", "review"])
 def test_claim_revalidates_exact_snapshot_after_supported_edit(
     fleet_home, all_assignees_spawnable, monkeypatch, lane,
@@ -244,7 +402,6 @@ def test_claim_revalidates_exact_snapshot_after_supported_edit(
                 edited = True
                 with kbc.connect() as writer:
                     assert kb.edit_task(writer, task_id, body=_body(tampered)) is True
-            return None
 
         monkeypatch.setattr(kbd, "check_respawn_guard", interleave_edit)
 
