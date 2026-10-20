@@ -165,6 +165,44 @@ def _linked_project_slug(project_id: str) -> Optional[str]:
     return project.slug if project is not None else None
 
 
+def _project_binding_reason(
+    row: Mapping[str, Any], contract: Mapping[str, Any], schema_version: int,
+) -> Optional[str]:
+    """Validate authoritative project linkage and its exact worktree binding."""
+    project_id = _value(row, "project_id")
+    if not isinstance(project_id, str) or not project_id.strip():
+        return "task_project_missing"
+    project_root = None
+    if schema_version == ROLE_CONTRACT_SCHEMA_VERSION:
+        from hermes_cli.kanban_fleet_project_registry import fleet_project_record
+
+        record = fleet_project_record(project_id)
+        project_slug = record[0] if record is not None else None
+        project_root = record[1] if record is not None else None
+    else:
+        # Legacy single-profile routes retain their existing registry contract.
+        project_slug = _linked_project_slug(project_id)
+    if project_slug is None:
+        return "task_project_unknown"
+    if project_slug != contract["repository"]:
+        return "repository_project_mismatch"
+    if _value(row, "workspace_kind") != "worktree":
+        return "task_workspace_kind_invalid"
+    branch_name = _value(row, "branch_name")
+    if not isinstance(branch_name, str) or not branch_name.startswith(f"{contract['repository']}/"):
+        return "repository_project_mismatch"
+    workspace_path = _value(row, "workspace_path")
+    if not isinstance(workspace_path, str) or not workspace_path.strip():
+        return "task_workspace_path_invalid"
+    expected_suffix = os.path.normpath(os.path.join(".worktrees", str(_value(row, "id"))))
+    normalized_workspace = os.path.normpath(workspace_path)
+    if not normalized_workspace.endswith(os.sep + expected_suffix):
+        return "task_workspace_path_invalid"
+    if project_root is not None and normalized_workspace != os.path.join(project_root, expected_suffix):
+        return "task_workspace_path_invalid"
+    return None
+
+
 def _fleet_contract_guard_reason(
     row: Mapping[str, Any], *, dispatch_lane: Optional[str] = None,
 ) -> Optional[str]:
@@ -277,27 +315,7 @@ def _fleet_contract_guard_reason(
         ):
             return "project_role_permission_forbidden"
 
-    project_id = _value(row, "project_id")
-    if not isinstance(project_id, str) or not project_id.strip():
-        return "task_project_missing"
-    project_slug = _linked_project_slug(project_id)
-    if project_slug is None:
-        return "task_project_unknown"
-    if project_slug != contract["repository"]:
-        return "repository_project_mismatch"
-    if _value(row, "workspace_kind") != "worktree":
-        return "task_workspace_kind_invalid"
-    branch_name = _value(row, "branch_name")
-    if not isinstance(branch_name, str) or not branch_name.startswith(f"{contract['repository']}/"):
-        return "repository_project_mismatch"
-    workspace_path = _value(row, "workspace_path")
-    if not isinstance(workspace_path, str) or not workspace_path.strip():
-        return "task_workspace_path_invalid"
-    expected_suffix = os.path.normpath(os.path.join(".worktrees", str(_value(row, "id"))))
-    normalized_workspace = os.path.normpath(workspace_path)
-    if not normalized_workspace.endswith(os.sep + expected_suffix):
-        return "task_workspace_path_invalid"
-    return None
+    return _project_binding_reason(row, contract, schema_version)
 
 
 def fleet_contract_guard_reason(
