@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import sqlite3
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -32,6 +33,13 @@ def fleet_home(tmp_path, monkeypatch):
         project_id = pdb.create_project(
             conn, name="Hermes Agent", slug="hermes-agent", folders=[str(tmp_path / "repo")],
         )
+    # Role-contract cards are created by the deterministic Director producer.
+    # Keep the legacy local registry fixture too, so schema-1 coverage is unchanged.
+    director = home / "profiles" / "director"
+    director.mkdir(parents=True)
+    with pdb.connect_closing() as source:
+        with sqlite3.connect(director / "projects.db") as destination:
+            source.backup(destination)
     return home, project_id
 
 
