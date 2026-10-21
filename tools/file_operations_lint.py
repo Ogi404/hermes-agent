@@ -142,14 +142,14 @@ def _external_diagnostics_enabled() -> bool:
     silently re-enable commands for a profile whose actual policy cannot be read.
     This controls enrichment, not the backend's file-edit implementation or terminal.
     """
-    from hermes_cli.config import load_config_readonly
-    from hermes_cli.config_read_errors import FailedConfigRead
-
     try:
+        from hermes_cli.config import load_config_readonly
+        from hermes_cli.config_read_errors import FailedConfigRead
+
         config = load_config_readonly()
-    except (OSError, ValueError, TypeError):
+        return not isinstance(config, FailedConfigRead) and config.get("file_external_diagnostics", True) is True
+    except Exception:  # health: allow BLE001 -- Enrichment must never break edits; refuse diagnostics without logging possibly secret-bearing config errors.
         return False
-    return not isinstance(config, FailedConfigRead) and config.get("file_external_diagnostics", True) is True
 
 
 class LintMixin:

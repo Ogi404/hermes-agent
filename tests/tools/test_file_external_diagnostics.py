@@ -34,9 +34,10 @@ def test_invalid_policy_never_enables_commands(ops, monkeypatch, value):
     ops._exec.assert_not_called()
 
 
-def test_unreadable_policy_skips_external_checks(ops, monkeypatch):
+@pytest.mark.parametrize("error", [OSError, ValueError, TypeError, RuntimeError, KeyError, AttributeError, ImportError])
+def test_unreadable_policy_skips_external_checks(ops, monkeypatch, error):
     def broken():
-        raise OSError("config unavailable")
+        raise error("config unavailable")
     monkeypatch.setattr("hermes_cli.config.load_config_readonly", broken)
     assert ops._check_lint("/workspace/a.js", content="anything").skipped
     ops._exec.assert_not_called()
@@ -87,11 +88,16 @@ def test_cached_operations_follow_effective_profile(ops, tmp_path, monkeypatch):
 
 
 @pytest.mark.platforms("posix")
-def test_real_write_and_patch_keep_integrity_and_json_refusal(tmp_path, monkeypatch):
+@pytest.mark.parametrize("config_error", [None, RuntimeError, KeyError, AttributeError])
+def test_real_write_and_patch_keep_integrity_and_json_refusal(tmp_path, monkeypatch, config_error):
     from tests.tools.test_file_operations import make_real_subprocess_env
     from tools.registry import registry
     from tools import file_tools
-    monkeypatch.setattr("hermes_cli.config.load_config_readonly", lambda: {"file_external_diagnostics": False})
+    def config():
+        if config_error:
+            raise config_error("config unavailable")
+        return {"file_external_diagnostics": False}
+    monkeypatch.setattr("hermes_cli.config.load_config_readonly", config)
     obj = ShellFileOperations(make_real_subprocess_env(str(tmp_path)))
     monkeypatch.setattr(obj, "_lsp_local_only", lambda: True)
     # Any accidental external diagnostics are inert sentinels, not project execution.
