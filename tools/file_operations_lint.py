@@ -135,6 +135,23 @@ LINTERS_INPROC: dict[str, Callable[[str], tuple[bool, str]]] = {
 _FAIL_CLOSED_INPROC_EXTS = frozenset({'.json', '.yaml', '.yml', '.toml'})
 
 
+def _external_diagnostics_enabled() -> bool:
+    """Resolve operator policy per call: cached file ops may serve different profiles.
+
+    Only literal True authorizes external diagnostics. Config fallbacks must not
+    silently re-enable commands for a profile whose actual policy cannot be read.
+    This controls enrichment, not the backend's file-edit implementation or terminal.
+    """
+    from hermes_cli.config import load_config_readonly
+    from hermes_cli.config_read_errors import FailedConfigRead
+
+    try:
+        config = load_config_readonly()
+    except (OSError, ValueError, TypeError):
+        return False
+    return not isinstance(config, FailedConfigRead) and config.get("file_external_diagnostics", True) is True
+
+
 class LintMixin:
     """Post-write syntax lint + LSP diagnostics. Requires ``_exec``,
     ``_has_command``, ``_escape_shell_arg``, ``_escape_native_tool_arg`` and
@@ -157,6 +174,8 @@ class LintMixin:
             return LintResult(success=ok, output="" if ok else err)
         if ext not in LINTERS:
             return LintResult(skipped=True, message=f"No linter for {ext} files")
+        if not _external_diagnostics_enabled():
+            return LintResult(success=False, skipped=True, message="External file diagnostics disabled by profile policy")
         # Single-file tsc can't read tsconfig.json and floods phantom TS2307/TS2339
         # errors the delta filter misreports as "pre-existing"; let the LSP tier speak.
         if ext == '.ts' and self._has_ancestor_tsconfig(path):
@@ -267,7 +286,7 @@ class LintMixin:
     def _lsp_service(self):
         """The active LSPService, or None on a non-local backend / any failure.
         LSP is an enrichment layer and must never break a write."""
-        if not self._lsp_local_only():
+        if not _external_diagnostics_enabled() or not self._lsp_local_only():
             return None
         try:
             from agent.lsp import get_service
@@ -279,7 +298,7 @@ class LintMixin:
         """True iff the active service (config-declared servers included) or, without one,
         the static registry claims ``ext``. Decides whether pre-write content is worth
         capturing for the line-shift map."""
-        if not ext:
+        if not ext or not _external_diagnostics_enabled():
             return False
         try:
             svc = self._lsp_service()

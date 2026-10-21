@@ -895,6 +895,29 @@ file_read_max_chars: 30000
 
 The agent also deduplicates file reads automatically — if the same file region is read twice and the file hasn't changed, a lightweight stub is returned instead of re-sending the content. This resets on context compression so the agent can re-read files after their content is summarized away.
 
+## Automatic File Diagnostics
+
+File writes and patches normally run external syntax checkers and, when enabled,
+LSP diagnostics. For edit-only workers whose verification belongs to a separate
+controller, set this in the worker profile's `config.yaml`:
+
+```yaml
+file_external_diagnostics: false
+```
+
+The default is `true`. Only literal YAML `true` enables external diagnostics;
+malformed values and unreadable-config fallbacks disable them. The policy is
+resolved from the effective profile on each call, including cached file tools.
+With `false`, edits cannot automatically launch shell linters, managed Node
+checkers, or LSP diagnostic requests. In-process Python/JSON/YAML/TOML parsing,
+JSON/YAML/TOML write refusals, path protections, stale-write checks, and write
+integrity verification remain unchanged. A skipped diagnostic is not a test pass.
+
+This setting is not OS-level containment and does not disable explicit terminal
+commands, file-tool implementation helpers, other tools, or an independently
+started LSP server. Keep the worker's sandbox and explicit execution restrictions;
+run project verification only in the authorized controller context.
+
 ## Tool Output Truncation Limits
 
 Three related caps control how much raw output a tool can return before Hermes truncates it:
