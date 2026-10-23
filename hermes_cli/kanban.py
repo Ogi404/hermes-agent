@@ -211,6 +211,7 @@ _DELEGATED_CHILD_DENIED_ACTIONS: frozenset[str] = frozenset({
     "schedule", "unblock", "promote", "archive", "dispatch", "daemon", "repair",
     "heartbeat", "notify-subscribe", "notify-unsubscribe", "specify", "decompose",
     "request-review", "request-changes", "reopen-review",
+    "gate-request", "gate-decide",
     "gc",
 })
 
@@ -759,6 +760,58 @@ def _cmd_comment(args: argparse.Namespace) -> int:
     with kbc.connect_closing() as conn:
         kb.add_comment(conn, args.task_id, author, body)
     print(f"Comment added to {args.task_id}")
+    return 0
+
+
+def _cmd_gate_request(args: argparse.Namespace) -> int:
+    from hermes_cli import kanban_human_gate as gate
+
+    requested_by = getattr(args, "_gate_actor", None) or args.requested_by or _profile_author()
+    with kbc.connect_closing() as conn:
+        event_id, created = gate.request_gate(
+            conn, args.task_id, stage=args.stage, sha=args.sha,
+            pr_url=args.pr_url, tests=args.tests,
+            reviewer_verdict=args.reviewer_verdict,
+            requested_by=requested_by,
+        )
+    verb = "Requested" if created else "Already requested"
+    print(f"{verb} {args.stage} gate for {args.task_id} at {args.sha} (event {event_id})")
+    return 0
+
+
+def _cmd_gate_decide(args: argparse.Namespace) -> int:
+    from hermes_cli import kanban_human_gate as gate
+
+    actor = getattr(args, "_gate_actor", None) or _profile_author()
+    platform = getattr(args, "_gate_platform", None) or "cli"
+    with kbc.connect_closing() as conn:
+        event_id, created = gate.decide_gate(
+            conn, args.task_id, stage=args.stage, decision=args.decision,
+            sha=args.sha, actor=actor, platform=platform,
+        )
+    verb = "Recorded" if created else "Already recorded"
+    print(f"{verb} {args.decision} for {args.stage} gate on {args.task_id} "
+          f"at {args.sha} (event {event_id})")
+    return 0
+
+
+def _cmd_gate_status(args: argparse.Namespace) -> int:
+    from hermes_cli import kanban_human_gate as gate
+
+    with kbc.connect_closing() as conn:
+        if kb.get_task(conn, args.task_id) is None:
+            return _err(f"no such task: {args.task_id}")
+        status = {stage: gate.latest_gate(conn, args.task_id, stage) for stage in gate.GATE_STAGES}
+    if args.json:
+        print(json.dumps(status, sort_keys=True))
+        return 0
+    for stage, value in status.items():
+        if value is None:
+            print(f"{stage}: no request")
+            continue
+        req, decision = value["request"], value["decision"]
+        suffix = f" -> {decision['decision']} by {decision['actor']}" if decision else " -> pending"
+        print(f"{stage}: {req['sha']} {req['pr_url']}{suffix}")
     return 0
 
 
@@ -1325,6 +1378,8 @@ _HANDLERS = {
     "diagnostics": _cmd_diagnostics, "diag": _cmd_diagnostics,
     "link": _cmd_link, "unlink": _cmd_unlink, "claim": _cmd_claim,
     "comment": _cmd_comment, "attach": _cmd_attach,
+    "gate-request": _cmd_gate_request, "gate-decide": _cmd_gate_decide,
+    "gate-status": _cmd_gate_status,
     "attachments": _cmd_attachments, "attach-rm": _cmd_attach_rm,
     "complete": _cmd_complete, "edit": _cmd_edit, "block": _cmd_block,
     "schedule": _cmd_schedule, "unblock": _cmd_unblock,
@@ -1351,6 +1406,7 @@ Common subcommands:
   `stats`               Per-status / per-assignee counts
   `create <title>…`     Create a task (auto-subscribes you to events)
   `comment <id> <msg>`  Append a comment
+  `gate-status <id>`    Show exact-SHA human delivery gates
   `attach <id> <path>`  Attach a local file; `attachments <id>` to list
   `complete <id>…`      Mark task(s) done
   `request-review <id>` Enter first-class review; `request-changes <id> <reason>` returns an active review to its implementer
@@ -1367,7 +1423,7 @@ Read-only commands are safe while an agent is running.\
 """
 
 
-def run_slash(rest: str) -> str:
+def run_slash(rest: str, *, actor: Optional[str] = None, actor_platform: Optional[str] = None) -> str:
     """Execute a ``/kanban …`` string (``rest`` = everything after ``/kanban``) and return captured
     stdout/stderr. Shared by the interactive CLI and the gateway so formatting is identical."""
     import io
@@ -1422,6 +1478,10 @@ def run_slash(rest: str) -> str:
     except argparse.ArgumentError as exc:
         return f"⚠ /kanban usage error\n{_usage_for_error()}\n{exc}"
 
+    # These values come from the authenticated gateway source, never user text.
+    # Direct CLI calls intentionally fall back to the active local profile.
+    args._gate_actor = actor
+    args._gate_platform = actor_platform
     with contextlib.redirect_stdout(buf_out), contextlib.redirect_stderr(buf_err):
         try:
             kanban_command(args)
