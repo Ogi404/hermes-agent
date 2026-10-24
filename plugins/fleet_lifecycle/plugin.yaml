@@ -1,0 +1,7 @@
+name: fleet_lifecycle
+version: 0.1.0
+kind: standalone
+description: Opt-in trusted verification controller; operator CLI only.
+author: NousResearch
+platforms:
+  - linux

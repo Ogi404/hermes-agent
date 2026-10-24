@@ -480,3 +480,41 @@ def test_dispatch_json_exposes_contract_guard_reason(fleet_home, monkeypatch, ca
     assert payload["contract_guarded"] == [
         {"task_id": "t_guarded", "reason": "snapshot_hash_mismatch"},
     ]
+
+
+def test_controller_managed_review_waits_without_consuming_native_review_slot(
+    fleet_home, all_assignees_spawnable, monkeypatch,
+):
+    """A trusted controller, not the generic review worker, owns this opt-in lane."""
+    home, project_id = fleet_home
+    spawned = []
+    monkeypatch.setattr(
+        kbd._kbw, "_resolve_worktree_workspace",
+        lambda task, **_kw: (home / "worktrees" / task.id, task.branch_name),
+    )
+    with kbc.connect() as conn:
+        held_id = _create_fleet_task(
+            conn, project_id,
+            _role_contract(issue_id="ENS-CONTROLLED", linear_id="controlled-review"),
+            assignee="reviewer", priority=10,
+        )
+        normal_id = _create_fleet_task(
+            conn, project_id,
+            _role_contract(issue_id="ENS-NORMAL", linear_id="normal-review"),
+            assignee="reviewer", priority=1,
+        )
+        with kb.write_txn(conn):
+            conn.execute("UPDATE tasks SET status='review' WHERE id IN (?, ?)", (held_id, normal_id))
+            conn.execute(
+                "UPDATE tasks SET workflow_template_id=?, current_step_key=? WHERE id=?",
+                ("fleet-source-review-v1", "awaiting_verification", held_id),
+            )
+        result = kbd.dispatch_once(
+            conn, max_spawn=1, spawn_fn=lambda task, _workspace: spawned.append(task.id),
+        )
+        held = kb.get_task(conn, held_id)
+        held_runs = conn.execute("SELECT COUNT(*) FROM task_runs WHERE task_id=?", (held_id,)).fetchone()[0]
+    assert spawned == [normal_id], "unverified controller-owned review consumed the native review slot"
+    assert [row[0] for row in result.spawned] == [normal_id]
+    assert held.status == "review" and held.claim_lock is None and held.current_run_id is None
+    assert held_runs == 0
