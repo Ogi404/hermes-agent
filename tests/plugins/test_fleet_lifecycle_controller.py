@@ -819,3 +819,29 @@ def test_unit_cleanup_stops_only_persisted_owned_unit(monkeypatch):
     monkeypatch.setattr(runtime,"run",fake_run)
     stop_owned_unit(rt,resource)
     assert [a[2] for a in calls] == ["show","stop","show"]
+
+
+@pytest.mark.parametrize("kind", ["", "Failed", "pytest.fail.Exception"])
+def test_mutant_proof_accepts_current_pytest_valueerror_display(kind):
+    """Pytest 9.1 emits the bare exception name, not the older class repr."""
+    from plugins.fleet_lifecycle.runtime import junit_proof
+    xml = (b'<testsuite><testcase classname="tests.test_cycle" name="test_regression">'
+           + ('<failure type="'+kind+'" message="Failed: DID NOT RAISE ValueError">').encode()
+           + b'E       Failed: DID NOT RAISE ValueError</failure></testcase></testsuite>')
+    assert junit_proof(xml, True, "test_regression", "tests/test_cycle.py") == 1
+
+
+@pytest.mark.parametrize("message", [
+    "Failed: DID NOT RAISE TypeError",
+    "Failed: DID NOT RAISE ValueErrorOther",
+    "Failed: DID NOT RAISE ValueError: unrelated",
+    "unrelated Failed: DID NOT RAISE ValueError",
+])
+def test_mutant_proof_rejects_nonexact_current_exception_display(message):
+    from plugins.fleet_lifecycle.runtime import junit_proof
+    from plugins.fleet_lifecycle.controller import Halt
+    xml = (b'<testsuite><testcase classname="tests.test_cycle" name="test_regression">'
+           + ('<failure type="Failed" message="'+message+'">').encode()
+           + b'Unexpected failure</failure></testcase></testsuite>')
+    with pytest.raises(Halt):
+        junit_proof(xml, True, "test_regression", "tests/test_cycle.py")

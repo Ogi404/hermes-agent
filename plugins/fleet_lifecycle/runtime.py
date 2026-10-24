@@ -115,7 +115,7 @@ def junit_proof(raw, mutant, selected, selected_file=None):
             text = (f.get("message") or "") + "\n" + (f.text or "")
             return (kind == "AssertionError" or (not kind and re.search(r"(?m)^E\s+AssertionError(?:[:\s]|$)", text) is not None) or
                     (kind in {"", "Failed", "pytest.fail.Exception"}
-                     and re.search(r"Failed: DID NOT RAISE <class ['\"]?ValueError['\"]?>", text) is not None))
+                     and re.search(r"(?m)^(?:E[ \t]+)?Failed: DID NOT RAISE (?:<class ['\"]?ValueError['\"]?>|ValueError)$", text) is not None))
         assertion_failures = [f for c in relevant for f in c.findall("failure") if expected_failure(f)]
         require(bool(assertion_failures) and len(assertion_failures) == len(failures), "verification_failed")
     return len(cases)
