@@ -44,7 +44,7 @@ def _pin_first():
 # "status" covers dashboard drag-drop and `_set_status_direct()`.
 # ``review_requested`` wakes the origin like a block but is not one;
 # the task is not archived so later review cycles keep notifying.
-TERMINAL_KINDS = ("completed", "blocked", "gave_up", "crashed", "timed_out", "status", "archived", "unblocked", "block_loop_detected", "review_requested", "changes_requested", "gate_requested", "gate_decided")
+TERMINAL_KINDS = ("completed", "blocked", "gave_up", "crashed", "timed_out", "status", "archived", "unblocked", "block_loop_detected", "review_requested", "changes_requested", "gate_requested", "gate_decided", "fleet_controller_failed", "fleet_controller_progress")
 # Kinds that hand a decision back to the origin, which must take a turn.
 # status/archived/unblocked are bookkeeping.
 _WAKE_KINDS = ("completed", "gave_up", "crashed", "timed_out", "blocked", "review_requested", "changes_requested", "block_loop_detected")
@@ -52,7 +52,7 @@ _WAKE_KINDS = ("completed", "gave_up", "crashed", "timed_out", "blocked", "revie
 
 def diagnostic_event(ev) -> bool:
     """Infrastructure attention is distinct from an explicit owner decision."""
-    if ev.kind in {"crashed", "timed_out", "gave_up"}:
+    if ev.kind in {"crashed", "timed_out", "gave_up", "fleet_controller_failed"}:
         return True
     if ev.kind in {"blocked", "block_loop_detected"}:
         return (ev.payload or {}).get("kind") != "needs_input"
@@ -498,6 +498,37 @@ def _fmt_gate_decided(ev, n) -> tuple:
             f"Exact SHA: `{sha}`\nActor: {actor} via {platform}", None, None)
 
 
+
+# These tokens are a closed producer/consumer protocol, never worker prose.
+_FLEET_PHASE_REASONS = {
+    "admit": {"admission_failed", "interrupted_action", "identity_drift"},
+    "waiting_source": {"handoff_invalid", "identity_drift", "interrupted_action"},
+    "verify": {"verification_passed", "verification_failed", "identity_drift", "interrupted_action"},
+    "precommit_review": {"review_approved", "review_rejected", "review_failed", "identity_drift", "interrupted_action"},
+    "commit": {"commit_created", "commit_failed", "identity_drift", "interrupted_action"},
+    "exact_review": {"review_approved", "review_rejected", "review_failed", "identity_drift", "interrupted_action"},
+    "request_push": {"gate_failed", "identity_drift", "interrupted_action"},
+}
+_FLEET_PROGRESS_REASONS = {"verification_passed", "review_approved", "commit_created"}
+
+
+def _fmt_fleet_controller(ev, n) -> tuple:
+    payload = ev.payload if isinstance(ev.payload, dict) else {}
+    phase, reason, plan_hash = (payload.get(key) for key in ("phase", "reason_code", "plan_hash"))
+    valid = (
+        isinstance(phase, str) and phase in _FLEET_PHASE_REASONS
+        and isinstance(reason, str) and reason in _FLEET_PHASE_REASONS[phase]
+        and isinstance(plan_hash, str) and re.fullmatch(r"[0-9a-f]{64}", plan_hash) is not None
+        and ((reason in _FLEET_PROGRESS_REASONS) == (ev.kind == "fleet_controller_progress"))
+    )
+    context = "progress" if ev.kind == "fleet_controller_progress" else "halted"
+    if not valid:
+        return f"{n.head} Fleet controller {context}; invalid event details discarded.", None, None
+    sha = payload.get("sha")
+    exact = f" sha={sha}" if isinstance(sha, str) and re.fullmatch(r"[0-9a-f]{40}", sha) else ""
+    return f"{n.head} Fleet controller {context}: phase={phase} reason_code={reason} plan_hash={plan_hash}{exact}", None, None
+
+
 # archived / unblocked are claimed (so the cursor advances past them) but
 # intentionally silent (no formatter), and excluded from _WAKE_KINDS so they
 # never wake the creator.
@@ -516,6 +547,8 @@ _EVENT_FORMATTERS: dict[str, Callable[[Any, _KanbanNotification], tuple]] = {
     "block_loop_detected": _fmt_block_loop_detected,
     "gate_requested": _fmt_gate_requested,
     "gate_decided": _fmt_gate_decided,
+    "fleet_controller_failed": _fmt_fleet_controller,
+    "fleet_controller_progress": _fmt_fleet_controller,
 }
 
 

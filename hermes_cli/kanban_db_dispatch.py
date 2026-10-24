@@ -1807,13 +1807,20 @@ def dispatch_profile_allowlist_summary() -> str:
             "profile, or the config could not be read — omit the key to allow any)")
 
 
+def _controller_managed_review(row: sqlite3.Row) -> bool:
+    """Native review must leave this workflow to the trusted controller."""
+    return _kb._row_get(row, "workflow_template_id") == "fleet-source-review-v1"
+
+
 def _has_spawnable(conn: sqlite3.Connection, status: str) -> bool:
     rows = conn.execute(
         "SELECT id, title, body, status, assignee, created_by, project_id, idempotency_key, "
-        "workspace_kind, workspace_path, branch_name FROM tasks "
+        "workspace_kind, workspace_path, branch_name, workflow_template_id FROM tasks "
         "WHERE status = ? AND assignee IS NOT NULL AND claim_lock IS NULL",
         (status,),
     ).fetchall()
+    if status == "review":
+        rows = [row for row in rows if not _controller_managed_review(row)]
     if not rows:
         return False
     profile_exists = _profile_exists_fn()
@@ -2128,6 +2135,8 @@ def _dispatch_lane_task(
         return _reject_guarded_contract(
             conn, task_id, contract_reason, result, lane=lane, dry_run=dry_run,
         )
+    if lane == "review" and _controller_managed_review(row):
+        return False
     # Non-profile assignees (control-plane lanes that pull via ``claim_task``)
     # would fail ``hermes -p <assignee>`` at startup and loop ready→crash→ready
     # forever. Bucketed apart from skipped_unassigned: the operator cannot fix
@@ -2181,17 +2190,32 @@ def _dispatch_lane_task(
         result.spawned.append((task_id, assignee, ""))
         _count_spawn(assignee)
         return True
+    def _claim_guard(claimed_row):
+        reason = fleet_contract_guard_reason(claimed_row, dispatch_lane=lane)
+        if reason is not None:
+            return reason
+        if lane == "review":
+            # The claim snapshot omits workflow metadata; read it under the
+            # same claim transaction so a newly opted-in card stays untouched.
+            workflow_row = conn.execute(
+                "SELECT workflow_template_id FROM tasks WHERE id = ?",
+                (task_id,),
+            ).fetchone()
+            if _controller_managed_review(workflow_row):
+                return "controller_managed_review"
+        return None
+
     claim = _kb.claim_review_task if lane == "review" else _kb.claim_task
     try:
         claimed = claim(
             conn,
             task_id,
             ttl_seconds=ttl_seconds,
-            guard=lambda claimed_row: fleet_contract_guard_reason(
-                claimed_row, dispatch_lane=lane,
-            ),
+            guard=_claim_guard,
         )
     except _kb.ClaimGuardRejected as exc:
+        if exc.reason == "controller_managed_review":
+            return False
         # Selection is advisory.  This is the authoritative validation of the
         # exact row serialized with the claim, so an edit between selection and
         # claim cannot reach workspace resolution or worker spawn.
@@ -2371,7 +2395,7 @@ def _lane_rows(conn: sqlite3.Connection, status: str) -> list[sqlite3.Row]:
     """Unclaimed rows of one lane in dispatch order."""
     return conn.execute(
         "SELECT id, title, body, status, assignee, created_by, project_id, idempotency_key, "
-        "workspace_kind, workspace_path, branch_name FROM tasks "
+        "workspace_kind, workspace_path, branch_name, workflow_template_id FROM tasks "
         f"WHERE status = '{status}' AND claim_lock IS NULL "
         "ORDER BY priority DESC, created_at ASC"
     ).fetchall()
@@ -2401,6 +2425,8 @@ def _any_spawnable_review(
         if not assignee:
             continue
         if fleet_contract_guard_reason(row) is not None:
+            continue
+        if _controller_managed_review(row):
             continue
         if profile_exists is not None and not profile_exists(assignee):
             continue
