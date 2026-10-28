@@ -845,3 +845,95 @@ def test_mutant_proof_rejects_nonexact_current_exception_display(message):
            + b'Unexpected failure</failure></testcase></testsuite>')
     with pytest.raises(Halt):
         junit_proof(xml, True, "test_regression", "tests/test_cycle.py")
+
+
+@pytest.fixture
+def markdown_scope_case(native_lifecycle):
+    """Fresh hash-valid held task in the real temporary native board, never live intake."""
+    from uuid import uuid4
+    from plugins.fleet_lifecycle.controller import Native, Plan, canonical, digest
+    from hermes_cli import kanban_db_notify as notify
+
+    controller, _backend, _tid, _auth = native_lifecycle
+
+    def make(variant):
+        data = json.loads(json.dumps(controller.plan.data))
+        data["mutation"].update(
+            before='            or child["current_run_id"] != expected_child_run_id\n',
+            after="            or False\n",
+        )
+        for key in ("before", "after"):
+            data["mutation"][key + "_sha256"] = digest(data["mutation"][key].encode())
+        scope = {key: data[key] for key in ("base", "candidate_paths", "test_files", "mutation")}
+        encoded = canonical(scope).decode()
+        legacy = "fleet-lifecycle-test-only-v1 " + encoded
+        fenced = "fleet-lifecycle-test-only-v1\n\n```json\n" + encoded + "\n```"
+        changed = json.loads(encoded)
+        changed["mutation"]["before"] += "changed"
+        wrong_base = json.loads(encoded)
+        wrong_base["base"] = "0" * 40
+        descriptions = {
+            "legacy": legacy,
+            "fenced": fenced,
+            "mutation": "fleet-lifecycle-test-only-v1\n\n```json\n" + canonical(changed).decode() + "\n```",
+            "base": "fleet-lifecycle-test-only-v1\n\n```json\n" + canonical(wrong_base).decode() + "\n```",
+            "language": fenced.replace("```json", "```JSON", 1),
+            "prose": fenced + "\nProceed anyway",
+            "noncanonical": fenced.replace(',"', ', "', 1),
+            "escaped": legacy.replace("[", "\\[").replace("]", "\\]").replace("\\n", "\\\\n").replace('\\"', '"'),
+            "contract_hash": fenced,
+        }
+        contract = _role_contract(
+            execution_mode="implement", description=descriptions[variant], linear_id=str(uuid4()),
+        )
+        data["contract_hash"] = contract["contract_sha256"]
+        with kbc.connect() as conn:
+            tid = _create_fleet_task(conn, data["project_id"], contract, initial_status="blocked")
+            task = kb.get_task(conn, tid)
+            data.update(task_id=tid, workspace=task.workspace_path, branch=task.branch_name)
+            notify.add_notify_sub(conn, task_id=tid, platform="slack", chat_id="CFIXTURE",
+                notifier_profile="default", delivery_mode="notify",
+                delivery_metadata={"slack_team_id": "TFIXTURE"})
+        if variant == "contract_hash":
+            data["contract_hash"] = "0" * 64
+        Plan.validate(data)
+        return Native(Plan(data, digest(canonical(data)))), legacy, fenced
+
+    return make
+
+
+def _scope_native_state(conn, tid):
+    return (
+        tuple(conn.execute("SELECT * FROM tasks WHERE id=?", (tid,)).fetchone()),
+        tuple(tuple(row) for row in conn.execute("SELECT * FROM task_runs WHERE task_id=? ORDER BY id", (tid,))),
+        tuple(tuple(row) for row in conn.execute("SELECT * FROM task_events WHERE task_id=? ORDER BY id", (tid,))),
+    )
+
+
+@pytest.mark.parametrize("variant", ["legacy", "fenced"])
+def test_native_markdown_scope_accepts_exact_representation_without_admission(markdown_scope_case, variant):
+    native, legacy, fenced = markdown_scope_case(variant)
+    with kbc.connect() as conn:
+        before = _scope_native_state(conn, native.p["task_id"])
+        row = native.task(conn)
+        assert row["status"] == "blocked"
+        assert row["current_run_id"] is None and row["worker_pid"] is None
+        assert row["workflow_template_id"] is None and row["claim_lock"] is None
+        assert _scope_native_state(conn, native.p["task_id"]) == before
+    assert native.scope_description() == legacy
+    if variant == "fenced":
+        assert native.scope_description(markdown=True) == fenced
+
+
+@pytest.mark.parametrize("variant", [
+    "mutation", "base", "language", "prose", "noncanonical", "escaped", "contract_hash",
+])
+def test_native_markdown_scope_rejects_nonexact_or_unbound_contract_without_mutation(markdown_scope_case, variant):
+    from plugins.fleet_lifecycle.controller import Halt
+    native, _legacy, _fenced = markdown_scope_case(variant)
+    with kbc.connect() as conn:
+        before = _scope_native_state(conn, native.p["task_id"])
+        with pytest.raises(Halt):
+            native.task(conn)
+        assert _scope_native_state(conn, native.p["task_id"]) == before
+        assert kb.get_task(conn, native.p["task_id"]).status == "blocked"
