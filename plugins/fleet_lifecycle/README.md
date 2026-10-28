@@ -14,16 +14,32 @@ controller, or production source may be changed. Production templates are reject
 The mutation targets a separate immutable production BASE blob, never the new test.
 A generic prose contract cannot prove this scope: the validated schema-2 frozen
 contract must have execution_mode=implement, task_lane=implementation and description
-EXACTLY the following prefix plus canonical JSON of these four plan fields:
+EXACTLY one of two plan-generated wire representations. Let J be the identical
+canonical JSON of the same four frozen plan fields: base, candidate_paths,
+test_files and mutation. The representations are these exact concatenations:
+
+    legacy (default): "fleet-lifecycle-test-only-v1 " + J
+    fenced (markdown=True): "fleet-lifecycle-test-only-v1\n\n```json\n" + J + "\n```"
+
+Quotes and + above describe concatenation, not wire bytes; each \n denotes one LF.
+The legacy prefix is followed by exactly one ASCII space. The fenced prefix is
+followed by exactly two LFs, literal ```json, one LF, J, one LF and literal ```.
+Neither representation has a trailing newline. A schematic legacy example is:
 
     fleet-lifecycle-test-only-v1 {"base":...,"candidate_paths":...,"mutation":...,"test_files":...}
 
 Canonical means json.dumps(value, sort_keys=True, separators=(",", ":"),
-ensure_ascii=True, allow_nan=False). This description is frozen/hash-validated by
-native fleet guard; the plan then binds its contract_sha256. Do not edit an existing
+ensure_ascii=True, allow_nan=False). Only exact full-description membership is
+accepted: no alternate fences, language labels, whitespace, prose, noncanonical
+JSON or repaired/unescaped exports. The native fleet guard still freezes and
+hash-validates the actual description; the plan binds that contract_sha256
+unchanged. The two wire forms do not share a contract hash. Do not edit an existing
 frozen task to retrofit permission. Unsupported/narrower prose-only contracts fail.
-This explicit description protocol requires a separately reviewed producer/operator
-contract, not a claim that arbitrary existing fleet cards are compatible.
+The fenced form is a supported strict protocol representation, not proof that an
+actual Linear UI roundtrip has passed. Source correction/capture, eligibility,
+admission and activation still require separate authority. This explicit protocol
+requires a separately reviewed producer/operator contract, not a claim that
+arbitrary existing fleet cards are compatible.
 
 In this checkout the native schema-2 snapshot has flat role-profile fields, not a
 nested role_policy. Native fleet guard validates those fields and project registry.

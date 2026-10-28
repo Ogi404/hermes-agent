@@ -317,9 +317,12 @@ class Native:
                 require((run["claim_lock"] or "").startswith(kb._host_prefix()), "handoff_invalid")
                 require(not _worker_alive(run["worker_pid"], run["worker_started_at"]), "handoff_invalid")
 
-    def scope_description(self):
-        return "fleet-lifecycle-test-only-v1 " + canonical({key: self.p[key] for key in
+    def scope_description(self, *, markdown=False):
+        description = canonical({key: self.p[key] for key in
             ("base", "candidate_paths", "test_files", "mutation")}).decode()
+        if markdown:
+            return "fleet-lifecycle-test-only-v1\n\n```json\n" + description + "\n```"
+        return "fleet-lifecycle-test-only-v1 " + description
 
     def subscription(self, conn):
         from hermes_cli.kanban_db_notify import list_notify_subs
@@ -345,7 +348,7 @@ class Native:
         require(row["project_id"] == p["project_id"] and row["workspace_kind"] == "worktree"
                 and row["workspace_path"] == p["workspace"] and row["branch_name"] == p["branch"])
         require(contract["task_lane"] == "implementation" and contract["execution_mode"] == "implement"
-                and contract["description"] == self.scope_description())
+                and contract["description"] in (self.scope_description(), self.scope_description(markdown=True)))
         for role, lane in (("director", "orchestration"), ("builder", "implementation"), ("reviewer", "review")):
             require(p["profiles"][role]["name"] in contract[lane + "_profiles"])
         if admitted:
