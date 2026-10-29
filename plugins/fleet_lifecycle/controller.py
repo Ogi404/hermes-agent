@@ -123,6 +123,33 @@ def read_regular(path, limit=2 * 1024 * 1024):
         os.close(fd)
 
 
+def sha256_regular(path):
+    """Stream large native binaries without widening the text-file read limits."""
+    limit = 512 * 1024 * 1024
+    path = safe_path(Path(path))
+    # A regular path can be replaced by a FIFO before open; never wait for a writer.
+    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    try:
+        info = os.fstat(fd)
+        require(stat.S_ISREG(info.st_mode) and 0 <= info.st_size <= limit)
+        result = hashlib.sha256()
+        total = 0
+        while total < info.st_size:
+            chunk = os.read(fd, min(1024 * 1024, info.st_size - total))
+            require(bool(chunk))
+            total += len(chunk)
+            require(total <= info.st_size and total <= limit)
+            result.update(chunk)
+        require(total == info.st_size)
+        final = os.fstat(fd)
+        # atime may change from our reads; content/identity metadata must not.
+        require((final.st_dev, final.st_ino, final.st_size, final.st_mtime_ns, final.st_ctime_ns)
+                == (info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns, info.st_ctime_ns))
+        return result.hexdigest()
+    finally:
+        os.close(fd)
+
+
 @dataclass(frozen=True)
 class Plan:
     data: dict
@@ -211,7 +238,7 @@ class Plan:
             require(isinstance(entry["functions"], list), "invalid_plan")
         c = p["commit"]
         fields(c, "name email message")
-        token(c["name"], r"[A-Za-z][A-Za-z ._-]{0,63}")
+        token(c["name"], r"[A-Za-z][A-Za-z0-9 ._-]{0,63}")
         token(c["email"], r"[A-Za-z0-9_.+-]+@[A-Za-z0-9.-]+", 128)
         token(c["message"], r"[A-Za-z0-9][A-Za-z0-9 ()_:,./-]{0,159}")
 

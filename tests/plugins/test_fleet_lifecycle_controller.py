@@ -937,3 +937,159 @@ def test_native_markdown_scope_rejects_nonexact_or_unbound_contract_without_muta
             native.task(conn)
         assert _scope_native_state(conn, native.p["task_id"]) == before
         assert kb.get_task(conn, native.p["task_id"]).status == "blocked"
+
+
+# Native identity compatibility: all subprocess/profile boundaries below are explicit fakes.
+@pytest.mark.parametrize("name", ["Ogi404", "Fixture 2", "A0"])
+def test_native_identity_compat_plan_preserves_configured_author(tmp_path, name):
+    from plugins.fleet_lifecycle.controller import Plan, canonical
+    data = plan_data(tmp_path)
+    data["commit"]["name"] = name
+    path = tmp_path / "identity-plan.json"
+    path.write_bytes(canonical(data))
+    plan = Plan.load(path)
+    assert plan.data["commit"]["name"] == name
+    assert path.read_bytes() == canonical(data)
+
+
+@pytest.mark.parametrize("name", ["", "4Fixture", "Fixture\nOther", "Fixture\x00Other", "Fixture;command", "A" * 65])
+def test_native_identity_compat_plan_retains_author_rejections(tmp_path, name):
+    from plugins.fleet_lifecycle.controller import Plan, Halt
+    data = plan_data(tmp_path)
+    data["commit"]["name"] = name
+    with pytest.raises(Halt):
+        Plan.validate(data)
+
+
+def _native_identity_compat_fixture(tmp_path, monkeypatch, size=64 * 1024 * 1024 + 17):
+    """Real regular-file bytes/FDs; explicit fake profile, Git metadata and PM probes."""
+    import hashlib
+    import os
+    from types import SimpleNamespace
+    import hermes_constants
+    import hermes_cli.profiles
+    import pm.testenv
+    import pm.environments
+    from plugins.fleet_lifecycle import controller as ctl, runtime as rt, reviewer
+    data = plan_data(tmp_path)
+    core, workspace = tmp_path / "core", tmp_path / "worktree"
+    core.mkdir(); workspace.mkdir()
+    for role, profile in data["profiles"].items():
+        home = tmp_path / role
+        home.mkdir()
+        config = home / "config.yaml"
+        config.write_text("fixture-profile-only\n")
+        profile["config_sha256"] = hashlib.sha256(config.read_bytes()).hexdigest()
+    binary = tmp_path / "binary"
+    with binary.open("wb") as f:
+        f.write(b"fixture-not-an-executable\n")
+        f.truncate(size)
+    launcher, client = tmp_path / "launcher", tmp_path / "reviewer" / "native-client.py"
+    launcher.write_text("fixture launcher, never executed\n")
+    client.write_text("fixture client, never imported\n")
+    def streamed_hash(path):
+        result = hashlib.sha256()
+        with path.open("rb") as f:
+            while chunk := f.read(65536):
+                result.update(chunk)
+        return result.hexdigest()
+    data["native"].update(binary=str(binary), binary_entry=str(binary),
+        binary_sha256=streamed_hash(binary) if size <= 512 * 1024 * 1024 else "f" * 64,
+        launcher=str(launcher), launcher_entry=str(launcher), launcher_sha256=streamed_hash(launcher),
+        client=str(client), client_sha256=streamed_hash(client))
+    tools = tmp_path / "tools"
+    python = tools / "gen-fixture" / "venv" / "bin" / "python"
+    python.parent.mkdir(parents=True)
+    python.write_text("fixture interpreter, never executed\n")
+    data["native"]["tools_root"] = str(tools)
+    monkeypatch.setattr(hermes_constants, "get_hermes_home", lambda: tmp_path / "director")
+    monkeypatch.setattr(hermes_cli.profiles, "get_active_profile_name", lambda: "director")
+    monkeypatch.setattr(pm.testenv, "testenv_python", lambda *_a: python)
+    monkeypatch.setattr(pm.environments, "store_root", lambda *_a, **_k: tools)
+    monkeypatch.setattr(reviewer, "profile_policy", lambda *_a: None)
+    monkeypatch.setattr(rt, "__file__", str(core / "plugins" / "fleet_lifecycle" / "runtime.py"))
+    class MetadataGit:
+        def __init__(self, *_args):
+            pass
+        def call(self, *args):
+            if args == ("rev-parse", "HEAD"):
+                return data["source_sha"].encode() + b"\n"
+            assert args == ("status", "--porcelain=v1", "--untracked-files=all")
+            return b""
+    monkeypatch.setattr(rt, "Git", MetadataGit)
+    runtime = object.__new__(rt.Runtime)
+    runtime.p = data
+    runtime.git_binary, runtime.env = "/fixture/git-never-executed", {}
+    opened, closed, reads = set(), set(), []
+    original_open, original_close, original_read = os.open, os.close, os.read
+    mutation = {"mode": None, "done": False}
+    def open_file(path, flags, *args, **kwargs):
+        fd = original_open(path, flags, *args, **kwargs)
+        if os.fspath(path) == str(binary):
+            opened.add(fd)
+        return fd
+    def close_file(fd):
+        if fd in opened:
+            closed.add(fd)
+        return original_close(fd)
+    def read_file(fd, count):
+        if fd in opened and fd not in closed:
+            assert 0 < count <= 1024 * 1024, "native binary hash must use bounded chunks"
+            reads.append(count)
+            if mutation["mode"] and not mutation["done"]:
+                mutation["done"] = True
+                with binary.open("r+b") as f:
+                    if mutation["mode"] == "truncate":
+                        f.truncate(size - 1)
+                    else:
+                        f.write(b"changed-in-place\n")
+        return original_read(fd, count)
+    monkeypatch.setattr(ctl.os, "open", open_file)
+    monkeypatch.setattr(ctl.os, "close", close_file)
+    monkeypatch.setattr(ctl.os, "read", read_file)
+    return SimpleNamespace(runtime=runtime, data=data, binary=binary, launcher=launcher, client=client,
+                           opened=opened, closed=closed, reads=reads, mutation=mutation)
+
+
+def test_native_identity_compat_large_binary_bounded_reads_and_fd_close(tmp_path, monkeypatch):
+    case = _native_identity_compat_fixture(tmp_path, monkeypatch)
+    try:
+        case.runtime.identity()
+    finally:
+        assert case.opened == case.closed
+    assert case.reads, "positive control must hash actual native-binary descriptor bytes"
+    assert case.runtime.test_python.is_file()
+
+
+@pytest.mark.parametrize("failure", ["oversize", "bad_hash", "truncate", "change", "symlink", "directory", "fifo"])
+def test_native_identity_compat_rejects_invalid_binary_without_fd_leak(tmp_path, monkeypatch, failure):
+    from plugins.fleet_lifecycle.controller import Halt
+    size = 512 * 1024 * 1024 + 1 if failure == "oversize" else 64 * 1024 * 1024 + 17
+    case = _native_identity_compat_fixture(tmp_path, monkeypatch, size)
+    if failure == "bad_hash":
+        case.data["native"]["binary_sha256"] = "0" * 64
+    elif failure in {"truncate", "change"}:
+        case.mutation["mode"] = failure
+    elif failure == "symlink":
+        target = case.binary.with_name("binary-target")
+        case.binary.rename(target)
+        case.binary.symlink_to(target)
+    elif failure in {"directory", "fifo"}:
+        import os
+        case.binary.unlink()
+        case.binary.mkdir() if failure == "directory" else os.mkfifo(case.binary)
+    with pytest.raises(Halt):
+        case.runtime.identity()
+    assert case.opened == case.closed
+    if failure == "oversize":
+        assert not case.reads, "oversized binary must fail before content reads"
+
+
+def test_native_identity_compat_other_file_read_cap_is_not_expanded(tmp_path, monkeypatch):
+    from plugins.fleet_lifecycle.controller import Halt
+    case = _native_identity_compat_fixture(tmp_path, monkeypatch, 128)
+    with case.client.open("r+b") as f:
+        f.truncate(64 * 1024 * 1024 + 1)
+    with pytest.raises(Halt):
+        case.runtime.identity()
+    assert not case.opened, "text/client rejection must precede binary hashing"
