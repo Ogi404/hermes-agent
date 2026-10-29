@@ -22,7 +22,7 @@ import xml.etree.ElementTree as ET
 from dataclasses import dataclass
 
 from plugins.fleet_lifecycle.controller import (
-    Halt, canonical, digest, read_regular, relative, require, safe_path, sha, strict_json,
+    Halt, canonical, digest, read_regular, relative, require, safe_path, sha, sha256_regular, strict_json,
 )
 
 
@@ -423,7 +423,9 @@ class Runtime:
         for key in ("binary", "launcher"):
             require(Path(p["native"][key + "_entry"]).resolve(strict=True) == Path(p["native"][key]))
         for key in ("client", "binary", "launcher"):
-            require(digest(read_regular(p["native"][key], 64 * 1024 * 1024)) == p["native"][key + "_sha256"])
+            actual = (sha256_regular(p["native"][key]) if key == "binary" else
+                      digest(read_regular(p["native"][key], 64 * 1024 * 1024)))
+            require(actual == p["native"][key + "_sha256"])
         core = Git(self.git_binary, p["core"], self.env)
         require(core.call("rev-parse", "HEAD").decode().strip() == p["source_sha"])
         require(not core.call("status", "--porcelain=v1", "--untracked-files=all"))
