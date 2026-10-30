@@ -11,7 +11,7 @@ import io
 import hashlib
 import os
 import re
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 import selectors
 import signal
 import subprocess
@@ -125,13 +125,13 @@ class Git:
     def __init__(self, executable, workspace, env):
         self.executable, self.workspace, self.env = executable, Path(workspace), env
 
-    def call(self, *args, ok=True, limit=MAX_OUTPUT):
+    def call(self, *args, ok=True, limit=MAX_OUTPUT, stdin=None):
         command = [self.executable, "--no-pager", "-c", "core.hooksPath=/dev/null",
                    "-c", "core.fsmonitor=false", "-c", "core.attributesFile=/dev/null", "-c", "tar.umask=0022",
                    "-c", "protocol.allow=never", "-c", "submodule.recurse=false",
                    "-c", "diff.external=", "-c", "commit.gpgsign=false", "-c", "core.quotePath=false",
                    "-C", str(self.workspace), *args]
-        result = run(command, cwd="/", env=self.env, limit=limit)
+        result = run(command, cwd="/", env=self.env, limit=limit, stdin=stdin)
         require(not ok or result.returncode == 0)
         return result.stdout
 
@@ -266,25 +266,92 @@ raise SystemExit(result.returncode)
 """
 
 
-def validate_archive(git, base, raw):
-    """Bind archive bytes/modes to every Git blob; reject links/export transforms."""
-    expected = {}
-    for item in git.call("ls-tree", "-r", "-z", "--full-tree", base, limit=16 * 1024 * 1024).split(b"\0"):
+
+def archive_relative(value):
+    require(isinstance(value, str) and 0 < len(value) <= 4096 and not re.search(r"[\x00-\x1f\x7f\\]", value), "verification_failed")
+    path = PurePosixPath(value)
+    require(not path.is_absolute() and str(path) == value and all(part not in {".", ".."} and part.lower() != ".git" for part in path.parts), "verification_failed")
+    return value
+
+
+def archive_capacity(git, base, scratch_mb):
+    entries = []
+    total = 0
+    tree = git.call("ls-tree", "-r", "-l", "-z", "--full-tree", base, limit=16 * 1024 * 1024)
+    for item in tree.split(b"\0"):
         if not item:
             continue
         header, path = item.split(b"\t", 1)
-        mode, kind, oid = header.decode().split()
-        name = path.decode(); relative(name)
+        mode, kind, oid, size = header.decode().split()
+        name = path.decode(); archive_relative(name); sha(oid, 40)
+        require(mode in {"100644", "100755"} and kind == "blob" and size.isdigit(), "verification_failed")
+        size = int(size); total += size
+        require(total <= 256 * 1024 * 1024, "verification_failed")
+        entries.append((name, mode, oid, size))
+    require(bool(entries) and len({e[0] for e in entries}) == len(entries), "verification_failed")
+    require(len(entries) * 41 <= 1024 * 1024, "verification_failed")
+    require(type(scratch_mb) is int and 64 <= scratch_mb <= 4096, "verification_failed")
+    directories = {str(parent) for name, *_ in entries for parent in PurePosixPath(name).parents}
+    # Budget the compressed input, extracted block allocation and directory/inode
+    # overhead together, plus bounded receipts/runner scratch. Never spend a
+    # source claim merely to learn that the immutable base cannot fit.
+    allocated = sum(((size + 4095) // 4096) * 4096 + 4096 for *_, size in entries)
+    required = allocated + 8192 * len(directories) + 192 * 1024 * 1024
+    require(required <= scratch_mb * 1024 * 1024, "verification_failed")
+    return entries
+
+
+def archive_snapshot(git, base, *, scratch_mb, max_bytes=128 * 1024 * 1024):
+    """Compress exact Git blobs, never attribute-transformed export bytes."""
+    require(type(max_bytes) is int and 0 < max_bytes <= 128 * 1024 * 1024, "verification_failed")
+    entries = archive_capacity(git, base, scratch_mb)
+    total = sum(size for *_, size in entries)
+    query = "".join(e[2] + "\n" for e in entries).encode()
+    batch = git.call("cat-file", "--batch", stdin=query, limit=total + 128 * len(entries))
+
+    class BoundedBuffer(io.BytesIO):
+        def write(self, data):
+            require(self.tell() + len(data) <= max_bytes, "verification_failed")
+            return super().write(data)
+
+    stream = BoundedBuffer()
+    offset = 0
+    with tarfile.open(fileobj=stream, mode="w:gz", compresslevel=6) as archive:
+        for name, mode, oid, size in entries:
+            header = f"{oid} blob {size}\n".encode()
+            require(batch[offset:offset + len(header)] == header, "verification_failed")
+            offset += len(header)
+            data = batch[offset:offset + size]
+            require(len(data) == size and hashlib.sha1(b"blob " + str(size).encode() + b"\0" + data).hexdigest() == oid,
+                    "verification_failed")
+            offset += size
+            require(batch[offset:offset + 1] == b"\n", "verification_failed"); offset += 1
+            info = tarfile.TarInfo(name); info.size = size; info.mode = int(mode, 8) & 0o777
+            archive.addfile(info, io.BytesIO(data))
+    require(offset == len(batch), "verification_failed")
+    return stream.getvalue()
+
+def validate_archive(git, base, raw):
+    """Bind archive bytes/modes to every Git blob; reject links/export transforms."""
+    expected = {}
+    for item in git.call("ls-tree", "-r", "-l", "-z", "--full-tree", base, limit=16 * 1024 * 1024).split(b"\0"):
+        if not item:
+            continue
+        header, path = item.split(b"\t", 1)
+        mode, kind, oid, size = header.decode().split()
+        name = path.decode(); archive_relative(name)
         require(mode in {"100644", "100755"} and kind == "blob", "verification_failed")
-        expected[name] = (mode, oid)
+        require(size.isdigit(), "verification_failed")
+        expected[name] = (mode, oid, int(size))
     seen = set()
     with tarfile.open(fileobj=io.BytesIO(raw)) as archive:
         for member in archive:
-            relative(member.name.rstrip("/"))
+            archive_relative(member.name.rstrip("/"))
             if member.isdir():
                 continue
             require(member.isfile() and member.name in expected and member.name not in seen, "verification_failed")
-            mode, oid = expected[member.name]
+            mode, oid, size = expected[member.name]
+            require(member.size == size, "verification_failed")
             require(member.mode & 0o777 == int(mode, 8) & 0o777, "verification_failed")
             data = archive.extractfile(member).read()
             object_id = hashlib.sha1(b"blob " + str(len(data)).encode() + b"\0" + data).hexdigest()
@@ -322,7 +389,7 @@ class DockerVerifier:
         evidence.mkdir(mode=0o700)
         # UID is the controller user, not root. Docker never sees a profile mount.
         require(os.getuid() != 0, "verification_failed")
-        base = rt.git.call("archive", "--format=tar", p["base"], limit=128 * 1024 * 1024)
+        base = archive_snapshot(rt.git, p["base"], scratch_mb=p["resources"]["scratch_mb"])
         require(len(base) <= min(128 * 1024 * 1024, p["resources"]["scratch_mb"] * 512 * 1024), "verification_failed")
         validate_archive(rt.git, p["base"], base)
         config = {"manifest": state["snapshot"]["manifest"], "mutation": p["mutation"],
@@ -454,6 +521,7 @@ class Runtime:
     def admission_snapshot(self):
         self.git.guard(self.p["branch"], self.p["base"])
         self.git.clean()
+        archive_capacity(self.git, self.p["base"], self.p["resources"]["scratch_mb"])
         for path in self.p["candidate_paths"]:
             require(not self.git.call("ls-tree", "-z", self.p["base"], "--", path))
             require(not (Path(self.p["workspace"]) / path).exists())
