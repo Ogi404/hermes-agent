@@ -276,7 +276,13 @@ Owned containment and interruption
 Candidate execution: nonroot, network none, read-only root, all capabilities dropped,
 no-new-privileges, memory/swap/CPU/PID limits, immutable local image, no credential or
 Docker socket mounts. Readonly PM generations/tools are the only host mounts.
-Baseline archive/overlay stream as a bounded RAM packet into a size-limited private
+Baseline exact Git blobs and modes are assembled into a compressed archive; export
+attributes and working-tree line-ending conversions do not alter verification bytes.
+Expanded blobs are capped at 256 MiB and compressed archive bytes at 128 MiB.
+Admission checks the immutable tree against the requested scratch budget before a
+source claim: compressed input, extracted blocks, metadata and runner/receipt reserve
+must fit together. Insufficient scratch is rejected, never silently increased.
+Archive/overlay stream as a bounded RAM packet into a size-limited private
 /var/tmp tmpfs; /tmp is separately size-limited. No candidate source or aggregate
 scratch bind is created on host. Archive packet <=132 MiB, output packet <=4 MiB,
 and each decoded JUnit/stdout/stderr <=1 MiB. Evidence is bounded per action and

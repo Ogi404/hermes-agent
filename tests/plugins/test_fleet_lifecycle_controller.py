@@ -736,9 +736,12 @@ def test_docker_adapter_uses_bounded_tmpfs_owned_cleanup_and_real_receipt_valida
         archive.addfile(info, io.BytesIO(raw))
     class FakeGitObjects:
         def call(self, *args, **kwargs):
-            if args[0] == "archive": return stream.getvalue()
+            if args[0] == "cat-file":
+                assert kwargs["stdin"] == (blob + "\n").encode()
+                return (blob + " blob " + str(len(raw)) + "\n").encode() + raw + b"\n"
             assert args[0] == "ls-tree"
-            return ("100644 blob " + blob + "\tproduction_guard.py\0").encode()
+            size = " " + str(len(raw)) if "-l" in args else ""
+            return ("100644 blob " + blob + size + "\tproduction_guard.py\0").encode()
     rt = module.Runtime.__new__(module.Runtime)
     rt.plan = SimpleNamespace(data=data, digest="a"*64); rt.p = data
     rt.git = FakeGitObjects(); rt.docker = "/fixture/docker"; rt.env = {}
