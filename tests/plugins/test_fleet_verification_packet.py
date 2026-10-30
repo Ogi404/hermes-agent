@@ -156,4 +156,3 @@ def test_archive_rejects_declared_blob_size_before_reading_untrusted_body(blob_r
     monkeypatch.setattr(tarfile.TarFile, "extractfile", forbidden_read)
     with pytest.raises(runtime.Halt, match="verification_failed"):
         runtime.validate_archive(git, base, stream.getvalue())
-
