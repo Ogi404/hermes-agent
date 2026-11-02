@@ -96,7 +96,7 @@ def prepare_native_request(module, messages, *, model, command, timeout):
 _HELPER = r"""
 import os, pathlib, pwd, signal, sys, types
 from hermes_constants import get_hermes_home
-from plugins.fleet_lifecycle.controller import canonical, digest, read_regular, require, strict_json
+from plugins.fleet_lifecycle.controller import canonical, digest, read_regular, require, sha256_regular, strict_json
 from plugins.fleet_lifecycle.reviewer import prepare_native_request, profile_policy, validate_verdict
 client=None
 
@@ -118,8 +118,11 @@ try:
     verified={}
     for key in ("client","binary","launcher"):
         require(not pathlib.Path(native[key]).is_relative_to(p["workspace"]))
-        verified[key]=read_regular(native[key],64*1024*1024)
-        require(digest(verified[key]) == native[key+"_sha256"])
+        if key == "binary":
+            require(sha256_regular(native[key]) == native[key+"_sha256"])
+        else:
+            verified[key]=read_regular(native[key],64*1024*1024)
+            require(digest(verified[key]) == native[key+"_sha256"])
     for key in ("binary","launcher"):
         require(pathlib.Path(native[key+"_entry"]).resolve(strict=True) == pathlib.Path(native[key]))
     # Load only the bytes just verified, never reopen the mutable module filename.

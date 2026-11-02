@@ -1096,3 +1096,71 @@ def test_native_identity_compat_other_file_read_cap_is_not_expanded(tmp_path, mo
     with pytest.raises(Halt):
         case.runtime.identity()
     assert not case.opened, "text/client rejection must precede binary hashing"
+
+
+@pytest.mark.parametrize("failure", [None, "bad_hash", "oversize", "symlink", "directory", "client_oversize"])
+def test_embedded_reviewer_large_native_binary_identity(embedded_native_helper, monkeypatch, capsys, failure):
+    """Actual helper with the existing recording client; never native inference."""
+    import hashlib
+    import os
+    from plugins.fleet_lifecycle import controller
+    case = embedded_native_helper
+    native = case.plan["native"]
+    binary = Path(native["binary"])
+    size = 512 * 1024 * 1024 + 1 if failure == "oversize" else 64 * 1024 * 1024 + 17
+    with binary.open("r+b") as f:
+        f.truncate(size)
+    if failure != "oversize":
+        h = hashlib.sha256()
+        with binary.open("rb") as f:
+            while chunk := f.read(1024 * 1024):
+                h.update(chunk)
+        native["binary_sha256"] = h.hexdigest()
+    if failure == "bad_hash":
+        native["binary_sha256"] = "0" * 64
+    elif failure == "symlink":
+        target = binary.with_name("binary-target")
+        binary.rename(target)
+        binary.symlink_to(target)
+    elif failure == "directory":
+        binary.unlink()
+        binary.mkdir()
+    elif failure == "client_oversize":
+        with Path(native["client"]).open("r+b") as f:
+            f.truncate(64 * 1024 * 1024 + 1)
+    active, opened, closed, reads = set(), [], [], []
+    real_open, real_close, real_read = os.open, os.close, os.read
+    def tracked_open(path, flags, *args, **kwargs):
+        fd = real_open(path, flags, *args, **kwargs)
+        if os.fspath(path) == str(binary):
+            active.add(fd)
+            opened.append(fd)
+        return fd
+    def tracked_close(fd):
+        if fd in active:
+            active.remove(fd)
+            closed.append(fd)
+        return real_close(fd)
+    def tracked_read(fd, count):
+        if fd in active:
+            reads.append(count)
+            assert count <= 1024 * 1024, "native binary reads must remain bounded"
+        return real_read(fd, count)
+    monkeypatch.setattr(controller.os, "open", tracked_open)
+    monkeypatch.setattr(controller.os, "close", tracked_close)
+    monkeypatch.setattr(controller.os, "read", tracked_read)
+    if failure is None:
+        case.invoke()
+        result = json.loads(capsys.readouterr().out)
+        assert result["verdict"]["verdict"] == "APPROVE"
+        assert [c[0] for c in case.calls] == ["policy", "prompt", "ctor", "completion", "close"]
+        assert reads
+    else:
+        with pytest.raises(SystemExit) as exc:
+            case.invoke()
+        assert exc.value.code == 1
+        assert json.loads(capsys.readouterr().out) == {"error": "review_failed"}
+        assert not any(c[0] in {"ctor", "completion"} for c in case.calls)
+        if failure in {"oversize", "client_oversize"}:
+            assert not reads
+    assert not active and opened == closed
