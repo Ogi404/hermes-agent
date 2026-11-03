@@ -15,14 +15,16 @@ from pathlib import Path, PurePosixPath
 import selectors
 import signal
 import subprocess
+import stat
 import tarfile
+import tempfile
 import time
 import uuid
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass
 
 from plugins.fleet_lifecycle.controller import (
-    Halt, canonical, digest, read_regular, relative, require, safe_path, sha, sha256_regular, strict_json,
+    Halt, canonical, digest, implementation_changes, read_regular, relative, require, safe_path, sha, sha256_regular, strict_json,
 )
 
 
@@ -148,8 +150,9 @@ class Git:
         require(not any(item.split(b"\n", 1)[0].lower().startswith((b"filter.", b"include.", b"includeif."))
                         for item in extra.split(b"\0") if item))
 
-    def status(self):
-        raw = self.call("status", "--porcelain=v1", "-z", "--untracked-files=all", "--ignored=matching")
+    def status(self, *, strict=False):
+        options = ("--no-optional-locks", "-c", "core.filemode=true", "-c", "core.ignorestat=false") if strict else ()
+        raw = self.call(*options, "status", "--porcelain=v1", "-z", "--untracked-files=all", "--ignored=matching")
         entries = []
         for item in raw.split(b"\0"):
             if item:
@@ -163,7 +166,92 @@ class Git:
         require(not self.status())
         require(not self.call("diff", "--cached", "--name-only"))
 
+    def base_blob(self, base, path):
+        entry = self.call("ls-tree", "-z", base, "--", path)
+        if not entry:
+            return None
+        match = re.fullmatch(b"100644 blob ([0-9a-f]{40})\t" + re.escape(path.encode()) + b"\0", entry)
+        require(match is not None)
+        oid = match[1].decode()
+        size = int(self.call("cat-file", "-s", oid))
+        require(0 <= size <= 1024 * 1024)
+        raw = self.call("cat-file", "blob", oid, limit=1024 * 1024)
+        require(len(raw) == size)
+        return raw
+
+    def implementation_preimages(self, p):
+        preimages, total = {}, 0
+        for change in implementation_changes(p):
+            raw = self.base_blob(p["base"], change["path"])
+            expected = change["base_sha256"]
+            require(raw is None if expected is None else raw is not None and digest(raw) == expected)
+            total += len(raw) if raw is not None else 0
+            require(total <= 2 * 1024 * 1024)
+            preimages[change["path"]] = raw
+        return preimages
+
+    def implementation_index(self, base):
+        expected = []
+        for entry in self.call("ls-tree", "-r", "-z", base).split(b"\0"):
+            if entry:
+                metadata, path = entry.split(b"\t", 1)
+                mode, _kind, oid = metadata.split(b" ")
+                expected.append(mode + b" " + oid + b" 0\t" + path)
+        actual = [entry for entry in self.call("ls-files", "--stage", "-z").split(b"\0") if entry]
+        require(sorted(actual) == sorted(expected))
+        # Hidden index entries could conceal edits to paths outside the manifest.
+        require(all(entry.startswith(b"H ") for entry in
+                    self.call("ls-files", "-v", "-z").split(b"\0") if entry))
+
+    def implementation_diff(self, p, manifest):
+        objects = self.call("rev-parse", "--path-format=absolute", "--git-path", "objects").decode().strip()
+        with tempfile.TemporaryDirectory(prefix="fleet-diff-") as directory:
+            root = Path(directory)
+            (root / "objects").mkdir()
+            isolated = Git(self.executable, self.workspace,
+                           {**self.env, "GIT_INDEX_FILE": str(root / "index"),
+                            "GIT_OBJECT_DIRECTORY": str(root / "objects"),
+                            "GIT_ALTERNATE_OBJECT_DIRECTORIES": objects})
+            isolated.call("read-tree", p["base"])
+            for item in manifest:
+                raw = base64.b64decode(item["bytes"], validate=True)
+                oid = isolated.call("hash-object", "-w", "--stdin", stdin=raw).decode().strip()
+                sha(oid, 40)
+                isolated.call("update-index", "--add", "--cacheinfo", "100644", oid, item["path"])
+            return isolated.call("diff", "--cached", "--no-ext-diff", "--no-textconv", "--no-renames",
+                                 "--binary", "--full-index", p["base"], "--", *p["candidate_paths"])
+
+    def capture_implementation(self, p):
+        self.guard(p["branch"], p["base"])
+        self.implementation_index(p["base"])
+        paths = self.status(strict=True)
+        require(set(paths) == set(p["candidate_paths"]))
+        preimages = self.implementation_preimages(p)
+        manifest, total = [], 0
+        for path in p["candidate_paths"]:
+            content = read_regular(self.workspace / path, 1024 * 1024)
+            require(stat.S_IMODE((self.workspace / path).lstat().st_mode) == 0o644)
+            before = preimages[path]
+            total += len(content) + (len(before) if before is not None else 0)
+            require(total <= 2 * 1024 * 1024)
+            require(before is None or content != before)
+            manifest.append({"path": path, "mode": "100644", "sha256": digest(content),
+                             "bytes": base64.b64encode(content).decode(),
+                             "base_bytes": base64.b64encode(before if before is not None else b"").decode(),
+                             "base_sha256": digest(before) if before is not None else None})
+        diff = self.implementation_diff(p, manifest)
+        self.guard(p["branch"], p["base"])
+        self.implementation_index(p["base"])
+        require(paths == self.status(strict=True))
+        for item in manifest:
+            require(stat.S_IMODE((self.workspace / item["path"]).lstat().st_mode) == 0o644)
+            require(digest(read_regular(self.workspace / item["path"], 1024 * 1024)) == item["sha256"])
+        return {"manifest": manifest, "manifest_hash": digest(canonical(manifest)),
+                "diff": base64.b64encode(diff).decode(), "diff_hash": digest(diff)}
+
     def capture(self, p):
+        if p.get("schema", 1) == 2:
+            return self.capture_implementation(p)
         self.guard(p["branch"], p["base"])
         paths = self.status()
         require(set(paths) == set(p["candidate_paths"]))
@@ -383,6 +471,8 @@ class DockerVerifier:
 
     def invocation(self, state, test_file, mutant):
         rt, p = self.runtime, self.runtime.p
+        require(test_file in p["test_files"], "verification_failed")
+        require(not mutant or p.get("schema", 1) == 1, "verification_failed")
         action = uuid.uuid4().hex
         name, label = "hermes-fleet-" + action, rt.plan.digest + "-" + action
         evidence = Path(p["state_root"]) / ("action-" + action)
@@ -433,7 +523,8 @@ class DockerVerifier:
         (evidence / "stderr.log").write_bytes(decoded["stderr"])
         require(result.returncode == (1 if mutant else 0), "verification_failed")
         xml = decoded["junit"]
-        count = junit_proof(xml, mutant, p["mutation"]["test_name"], test_file if mutant else None)
+        selected = p["mutation"]["test_name"] if p["mutation"] is not None else ""
+        count = junit_proof(xml, mutant, selected, test_file if mutant else None)
         (evidence / "junit.xml").write_bytes(xml)
         receipt = {"action": action, "manifest_hash": state["snapshot"]["manifest_hash"],
                    "test_file": test_file, "mutant": mutant, "returncode": result.returncode,
@@ -446,7 +537,8 @@ class DockerVerifier:
     def verify(self, state):
         p = self.runtime.p
         receipts = [self.invocation(state, path, False) for path in p["test_files"]]
-        receipts.append(self.invocation(state, p["mutation"]["test_file"], True))
+        if p.get("schema", 1) == 1:
+            receipts.append(self.invocation(state, p["mutation"]["test_file"], True))
         return receipts
 
 
@@ -520,15 +612,52 @@ class Runtime:
 
     def admission_snapshot(self):
         self.git.guard(self.p["branch"], self.p["base"])
-        self.git.clean()
+        if self.p.get("schema", 1) == 2:
+            require(not self.git.status(strict=True))
+        else:
+            self.git.clean()
         archive_capacity(self.git, self.p["base"], self.p["resources"]["scratch_mb"])
-        for path in self.p["candidate_paths"]:
-            require(not self.git.call("ls-tree", "-z", self.p["base"], "--", path))
-            require(not (Path(self.p["workspace"]) / path).exists())
-        self.mutation_base()
+        if self.p.get("schema", 1) == 2:
+            self.implementation_admission()
+        else:
+            for path in self.p["candidate_paths"]:
+                require(not self.git.call("ls-tree", "-z", self.p["base"], "--", path))
+                require(not (Path(self.p["workspace"]) / path).exists())
+            self.mutation_base()
+
+    def implementation_admission(self):
+        p = self.p
+        self.git.implementation_index(p["base"])
+        require(not self.git.status(strict=True))
+        preimages = self.git.implementation_preimages(p)
+        for path, before in preimages.items():
+            target = Path(p["workspace"]) / path
+            if before is None:
+                require(not os.path.lexists(target))
+                # Check existing parents even when the final path is absent.
+                for parent in target.parents:
+                    if parent == Path(p["workspace"]):
+                        break
+                    if os.path.lexists(parent):
+                        safe_path(parent, directory=True)
+            else:
+                require(read_regular(target, 1024 * 1024) == before)
+                require(stat.S_IMODE(target.lstat().st_mode) == 0o644)
+        for path in p["test_files"]:
+            raw = self.git.base_blob(p["base"], path)
+            if raw is None:
+                require(path in preimages and preimages[path] is None)
+            else:
+                target = Path(p["workspace"]) / path
+                require(read_regular(target, 1024 * 1024) == raw)
+                require(stat.S_IMODE(target.lstat().st_mode) == 0o644)
+        self.git.guard(p["branch"], p["base"])
+        require(not self.git.status(strict=True))
+        self.git.implementation_index(p["base"])
 
     def snapshot(self):
-        self.mutation_base()
+        if self.p.get("schema", 1) != 2:
+            self.mutation_base()
         return self.git.capture(self.p)
 
     def own(self, state, resource):

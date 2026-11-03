@@ -8,6 +8,19 @@ has no lifecycle side effects. No commit, deployment, activation, live admission
 Slack transmission, ENS9 retry, or native review was performed by this source pass.
 Unit fixtures are NOT native Reviewer approval or live pipeline evidence.
 
+Plan schema 2 is staged infrastructure, not yet operational: it binds ordered
+Python candidate changes to immutable base SHA-256 preimages (or explicit null
+for new files), with separate test selection and no mutation. Its scope prefix is
+fleet-lifecycle-implementation-v1; both wire forms below apply with canonical JSON
+keys base, candidate_paths, test_files and changes. Capture binds before/after
+bytes and a complete binary diff without staging the real index. Admission checks
+candidate preimages and baseline/new test availability. The Docker verifier runs
+the frozen canonical Python tests for schema 2 without a synthetic mutation; the
+existing test-only mutation proof remains unchanged for schema 1. Role instructions
+and operational activation have NOT been extended for schema 2. This is not an
+acceptance, deployment or authorization claim. The MVP contract below remains the
+unchanged plan-schema-1 operational scope.
+
 The MVP supports exactly ONE harmless NEW focused Python test (mode 100644).
 The candidate list equals the test-file list. No existing tests, conftest, runner,
 controller, or production source may be changed. Production templates are rejected.
