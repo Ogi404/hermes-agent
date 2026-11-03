@@ -8,9 +8,11 @@ code accidentally.
 
 from __future__ import annotations
 
+import sqlite3
+
 import re
 import time
-from typing import Any, Optional
+from typing import Any, Iterator, Optional
 
 from hermes_cli import kanban_db as kb
 
@@ -48,7 +50,7 @@ def _decision(value: str) -> str:
     return value
 
 
-def _events_desc(conn, task_id: str, *kinds: str):
+def _events_desc(conn: sqlite3.Connection, task_id: str, *kinds: str) -> Iterator[tuple[int, str, dict]]:
     marks = ",".join("?" for _ in kinds)
     rows = conn.execute(
         f"SELECT id, kind, payload FROM task_events WHERE task_id = ? "
@@ -59,7 +61,7 @@ def _events_desc(conn, task_id: str, *kinds: str):
         yield int(row["id"]), str(row["kind"]), kb._json_dict(row["payload"])
 
 
-def latest_gate(conn, task_id: str, stage: Optional[str] = None) -> Optional[dict]:
+def latest_gate(conn: sqlite3.Connection, task_id: str, stage: Optional[str] = None) -> Optional[dict]:
     """Return the newest request with its decision, if one exists."""
     wanted = _stage(stage) if stage is not None else None
     decisions: list[tuple[int, dict]] = []
@@ -79,7 +81,7 @@ def latest_gate(conn, task_id: str, stage: Optional[str] = None) -> Optional[dic
 
 
 def request_gate(
-    conn,
+    conn: sqlite3.Connection,
     task_id: str,
     *,
     stage: str,
@@ -134,7 +136,7 @@ def request_gate(
 
 
 def decide_gate(
-    conn,
+    conn: sqlite3.Connection,
     task_id: str,
     *,
     stage: str,
