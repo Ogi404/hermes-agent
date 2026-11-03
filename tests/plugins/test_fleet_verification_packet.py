@@ -106,7 +106,7 @@ def test_real_docker_adapter_receives_compressed_exact_object_packet(blob_repo, 
     git, base = blob_repo
     root = tmp_path / "evidence"
     root.mkdir()
-    data = {"base": base, "state_root": str(root), "native": {"tools_root": "/fixture/tools"},
+    data = {"base": base, "test_files": ["tests/test_new.py"], "state_root": str(root), "native": {"tools_root": "/fixture/tools"},
             "mutation": {"test_file": "tests/test_new.py", "test_name": "test_new"},
             "resources": {"image": "sha256:" + "a" * 64, "cpus": 1, "memory_mb": 1024,
                           "pids": 128, "seconds": 60, "scratch_mb": 256}}

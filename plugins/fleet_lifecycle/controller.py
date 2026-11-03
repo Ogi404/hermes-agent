@@ -94,6 +94,25 @@ def relative(value):
         p in {".", "..", ".git", ".hermes"} for p in parts), "invalid_plan")
 
 
+def implementation_changes(p):
+    require(p["mutation"] is None, "invalid_plan")
+    paths = p["candidate_paths"]
+    require(isinstance(paths, list) and 0 < len(paths) <= 24, "invalid_plan")
+    for path in paths:
+        relative(path)
+        require(path.endswith(".py") and not path.endswith("conftest.py")
+                and not path.startswith(("scripts/", "plugins/fleet_lifecycle/")), "invalid_plan")
+    require(paths == sorted(set(paths)), "invalid_plan")
+    changes = p["changes"]
+    require(isinstance(changes, list) and len(changes) == len(paths), "invalid_plan")
+    for path, change in zip(paths, changes):
+        fields(change, "path base_sha256")
+        require(change["path"] == path, "invalid_plan")
+        if change["base_sha256"] is not None:
+            sha(change["base_sha256"])
+    return changes
+
+
 def safe_path(path, *, directory=False, private=False):
     path = Path(path)
     require(path.is_absolute())
@@ -166,8 +185,10 @@ class Plan:
 
     @staticmethod
     def validate(p):
-        fields(p, "schema board database task_id project_id workspace branch base contract_hash core source_sha candidate_paths test_files mutation resources profiles native state_root slack gate context commit")
-        require(type(p["schema"]) is int and p["schema"] == 1, "invalid_plan")
+        require(isinstance(p, dict) and type(p.get("schema")) is int
+                and p["schema"] in {1, 2}, "invalid_plan")
+        keys = "schema board database task_id project_id workspace branch base contract_hash core source_sha candidate_paths test_files mutation resources profiles native state_root slack gate context commit"
+        fields(p, keys + (" changes" if p["schema"] == 2 else ""))
         for key in ("database", "workspace", "core", "state_root"):
             absolute(p[key])
         token(p["board"], r"[a-z0-9][a-z0-9_-]{0,79}")
@@ -184,19 +205,22 @@ class Plan:
                         and not item.endswith("conftest.py"), "invalid_plan")
         for item in p["test_files"]:
             require(re.fullmatch(r"tests/(?:[A-Za-z0-9_-]+/)*test_[A-Za-z0-9_]+[.]py", item), "invalid_plan")
-        m = p["mutation"]
-        fields(m, "path base_sha256 mutant_sha256 before after before_sha256 after_sha256 test_file test_name")
-        sha(m["base_sha256"]); sha(m["mutant_sha256"])
-        relative(m["path"])
-        require(p["candidate_paths"] == p["test_files"] and len(p["test_files"]) == 1
-                and m["path"] not in p["candidate_paths"] and not m["path"].startswith("tests/")
-                and m["test_file"] in p["test_files"], "invalid_plan")
-        token(m["test_name"], r"test_[A-Za-z0-9_]+", 160)
-        for key in ("before", "after"):
-            require(isinstance(m[key], str) and 0 < len(m[key].encode()) <= 8192, "invalid_plan")
-            sha(m[key + "_sha256"])
-            require(digest(m[key].encode()) == m[key + "_sha256"], "invalid_plan")
-        require(m["before"] != m["after"], "invalid_plan")
+        if p["schema"] == 2:
+            implementation_changes(p)
+        else:
+            m = p["mutation"]
+            fields(m, "path base_sha256 mutant_sha256 before after before_sha256 after_sha256 test_file test_name")
+            sha(m["base_sha256"]); sha(m["mutant_sha256"])
+            relative(m["path"])
+            require(p["candidate_paths"] == p["test_files"] and len(p["test_files"]) == 1
+                    and m["path"] not in p["candidate_paths"] and not m["path"].startswith("tests/")
+                    and m["test_file"] in p["test_files"], "invalid_plan")
+            token(m["test_name"], r"test_[A-Za-z0-9_]+", 160)
+            for key in ("before", "after"):
+                require(isinstance(m[key], str) and 0 < len(m[key].encode()) <= 8192, "invalid_plan")
+                sha(m[key + "_sha256"])
+                require(digest(m[key].encode()) == m[key + "_sha256"], "invalid_plan")
+            require(m["before"] != m["after"], "invalid_plan")
         r = p["resources"]
         fields(r, "image seconds cpus memory_mb pids scratch_mb")
         token(r["image"], r"sha256:[0-9a-f]{64}", 71)
@@ -345,11 +369,13 @@ class Native:
                 require(not _worker_alive(run["worker_pid"], run["worker_started_at"]), "handoff_invalid")
 
     def scope_description(self, *, markdown=False):
-        description = canonical({key: self.p[key] for key in
-            ("base", "candidate_paths", "test_files", "mutation")}).decode()
+        implementation = self.p.get("schema", 1) == 2
+        keys = ("base", "candidate_paths", "test_files", "changes" if implementation else "mutation")
+        prefix = "fleet-lifecycle-implementation-v1" if implementation else "fleet-lifecycle-test-only-v1"
+        description = canonical({key: self.p[key] for key in keys}).decode()
         if markdown:
-            return "fleet-lifecycle-test-only-v1\n\n```json\n" + description + "\n```"
-        return "fleet-lifecycle-test-only-v1 " + description
+            return prefix + "\n\n```json\n" + description + "\n```"
+        return prefix + " " + description
 
     def subscription(self, conn):
         from hermes_cli.kanban_db_notify import list_notify_subs
