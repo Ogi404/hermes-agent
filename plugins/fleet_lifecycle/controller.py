@@ -94,13 +94,44 @@ def relative(value):
         p in {".", "..", ".git", ".hermes"} for p in parts), "invalid_plan")
 
 
+PROJECT_SOURCE_SUFFIXES = (".py", ".ts", ".tsx", ".js", ".mjs", ".cjs", ".json")
+PROJECT_TEST_RE = re.compile(r"^(?:tests/[\w./-]+[.]py|[\w./-]*[\w][.](?:test|spec)[.][cm]?[jt]sx?)$")
+
+
+def verification_lane(p):
+    """Resolve the trusted verification lane; default is the Python test env."""
+    spec = p.get("verification")
+    if spec is None:
+        return "python_testenv"
+    require(p.get("schema", 1) == 2 and p["mutation"] is None, "invalid_plan")
+    fields(spec, "lane runner runner_sha256 image commands manifest_files registry_host networked_phase")
+    require(spec["lane"] == "fleet_project_exec", "invalid_plan")
+    absolute(spec["runner"])
+    sha(spec["runner_sha256"])
+    token(spec["image"], r"sha256:[0-9a-f]{64}", 71)
+    require(isinstance(spec["commands"], list) and 1 <= len(spec["commands"]) <= 6, "invalid_plan")
+    for command in spec["commands"]:
+        require(isinstance(command, str)
+                and re.fullmatch(r"npm run [a-z0-9][a-z0-9:_-]{0,63}", command) is not None, "invalid_plan")
+    require(isinstance(spec["manifest_files"], list) and 1 <= len(spec["manifest_files"]) <= 8, "invalid_plan")
+    for item in spec["manifest_files"]:
+        relative(item)
+    require(spec["manifest_files"] == sorted(set(spec["manifest_files"])), "invalid_plan")
+    require({"package.json", "package-lock.json"} <= set(spec["manifest_files"]), "invalid_plan")
+    token(spec["registry_host"], r"[A-Za-z0-9][A-Za-z0-9.-]{1,80}")
+    require(spec["networked_phase"] == "dependency-acquisition", "invalid_plan")
+    return "fleet_project_exec"
+
+
 def implementation_changes(p):
     require(p["mutation"] is None, "invalid_plan")
+    lane = verification_lane(p)
+    suffixes = PROJECT_SOURCE_SUFFIXES if lane == "fleet_project_exec" else (".py",)
     paths = p["candidate_paths"]
     require(isinstance(paths, list) and 0 < len(paths) <= 24, "invalid_plan")
     for path in paths:
         relative(path)
-        require(path.endswith(".py") and not path.endswith("conftest.py")
+        require(path.endswith(suffixes) and not path.endswith("conftest.py")
                 and not path.startswith(("scripts/", "plugins/fleet_lifecycle/")), "invalid_plan")
     require(paths == sorted(set(paths)), "invalid_plan")
     changes = p["changes"]
@@ -188,7 +219,11 @@ class Plan:
         require(isinstance(p, dict) and type(p.get("schema")) is int
                 and p["schema"] in {1, 2}, "invalid_plan")
         keys = "schema board database task_id project_id workspace branch base contract_hash core source_sha candidate_paths test_files mutation resources profiles native state_root slack gate context commit"
-        fields(p, keys + (" changes" if p["schema"] == 2 else ""))
+        if "verification" in p:
+            require(p["schema"] == 2 and isinstance(p["verification"], dict), "invalid_plan")
+        fields({key: value for key, value in p.items() if key != "verification"},
+               keys + (" changes" if p["schema"] == 2 else ""))
+        lane = verification_lane(p)
         for key in ("database", "workspace", "core", "state_root"):
             absolute(p[key])
         token(p["board"], r"[a-z0-9][a-z0-9_-]{0,79}")
@@ -204,7 +239,10 @@ class Plan:
                 require(not item.startswith(("scripts/", "plugins/fleet_lifecycle/"))
                         and not item.endswith("conftest.py"), "invalid_plan")
         for item in p["test_files"]:
-            require(re.fullmatch(r"tests/(?:[A-Za-z0-9_-]+/)*test_[A-Za-z0-9_]+[.]py", item), "invalid_plan")
+            if lane == "fleet_project_exec":
+                require(PROJECT_TEST_RE.fullmatch(item) is not None, "invalid_plan")
+            else:
+                require(re.fullmatch(r"tests/(?:[A-Za-z0-9_-]+/)*test_[A-Za-z0-9_]+[.]py", item), "invalid_plan")
         if p["schema"] == 2:
             implementation_changes(p)
         else:
