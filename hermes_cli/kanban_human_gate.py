@@ -17,6 +17,9 @@ from typing import Any, Iterator, Optional
 from hermes_cli import kanban_db as kb
 
 
+GatePayload = dict[str, Any]
+
+
 GATE_STAGES = ("push", "ready", "merge")
 GATE_DECISIONS = ("approve", "hold", "reject")
 _SHA_RE = re.compile(r"^[0-9a-f]{40}$")
@@ -50,7 +53,7 @@ def _decision(value: str) -> str:
     return value
 
 
-def _events_desc(conn: sqlite3.Connection, task_id: str, *kinds: str) -> Iterator[tuple[int, str, dict]]:
+def _events_desc(conn: sqlite3.Connection, task_id: str, *kinds: str) -> Iterator[tuple[int, str, GatePayload]]:
     marks = ",".join("?" for _ in kinds)
     rows = conn.execute(
         f"SELECT id, kind, payload FROM task_events WHERE task_id = ? "
@@ -61,10 +64,10 @@ def _events_desc(conn: sqlite3.Connection, task_id: str, *kinds: str) -> Iterato
         yield int(row["id"]), str(row["kind"]), kb._json_dict(row["payload"])
 
 
-def latest_gate(conn: sqlite3.Connection, task_id: str, stage: Optional[str] = None) -> Optional[dict]:
+def latest_gate(conn: sqlite3.Connection, task_id: str, stage: Optional[str] = None) -> Optional[GatePayload]:
     """Return the newest request with its decision, if one exists."""
     wanted = _stage(stage) if stage is not None else None
-    decisions: list[tuple[int, dict]] = []
+    decisions: list[tuple[int, GatePayload]] = []
     for event_id, kind, payload in _events_desc(conn, task_id, "gate_requested", "gate_decided"):
         if wanted is not None and payload.get("stage") != wanted:
             continue
@@ -109,7 +112,7 @@ def request_gate(
     with kb.write_txn(conn):
         kb._require_task(conn, task_id)
         current = latest_gate(conn, task_id, stage)
-        payload = {
+        payload: GatePayload = {
             "stage": stage,
             "sha": sha,
             "pr_url": pr_url,
@@ -171,7 +174,7 @@ def decide_gate(
             raise ValueError(
                 f"{stage} gate request for {sha} already has decision {prior.get('decision')}"
             )
-        payload = {
+        payload: GatePayload = {
             "stage": stage,
             "decision": decision,
             "sha": sha,
