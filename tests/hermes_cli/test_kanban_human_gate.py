@@ -78,6 +78,41 @@ def test_gate_decision_is_exact_sha_idempotent_and_audited(kanban_home):
         assert comments[-1].body == f"HUMAN GATE APPROVE: stage=ready sha={SHA_A} via=slack"
 
 
+def test_gate_payloads_round_trip_request_and_decision_values(kanban_home):
+    with kbc.connect() as conn:
+        tid = _task(conn)
+        request_id, _ = _request(conn, tid)
+        expected_request: gate.GatePayload = {
+            "stage": "ready", "sha": SHA_A, "pr_url": PR,
+            "tests": "132 passed; 0 failed", "reviewer_verdict": "APPROVE",
+            "requested_by": "controller",
+        }
+        assert gate.latest_gate(conn, tid, "ready") == {
+            "request_event_id": request_id,
+            "request": expected_request,
+            "decision": None,
+        }
+
+        decision_id, _ = gate.decide_gate(
+            conn, tid, stage="ready", decision="hold", sha=SHA_A,
+            actor="U_OWNER", platform="slack",
+        )
+        expected_decision: gate.GatePayload = {
+            "stage": "ready", "decision": "hold", "sha": SHA_A,
+            "actor": "U_OWNER", "platform": "slack",
+            "request_event_id": request_id,
+        }
+        assert list(gate._events_desc(conn, tid, "gate_requested", "gate_decided")) == [
+            (decision_id, "gate_decided", expected_decision),
+            (request_id, "gate_requested", expected_request),
+        ]
+        assert gate.latest_gate(conn, tid, "ready") == {
+            "request_event_id": request_id,
+            "request": expected_request,
+            "decision": expected_decision,
+        }
+
+
 def test_gate_request_rejects_noncanonical_evidence(kanban_home):
     with kbc.connect() as conn:
         tid = _task(conn)
