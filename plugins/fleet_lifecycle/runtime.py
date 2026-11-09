@@ -24,7 +24,8 @@ import xml.etree.ElementTree as ET
 from dataclasses import dataclass
 
 from plugins.fleet_lifecycle.controller import (
-    Halt, canonical, digest, implementation_changes, read_regular, relative, require, safe_path, sha, sha256_regular, strict_json,
+    Halt, canonical, digest, implementation_changes, read_regular, relative, require, safe_path, sha, sha256_regular,
+    strict_json, verification_lane,
 )
 
 
@@ -542,6 +543,68 @@ class DockerVerifier:
         return receipts
 
 
+PROJECT_EXEC_MARKERS = (
+    b"PHASE A REGISTRY FETCH: PROVEN",
+    b"PHASE B NETWORK: none",
+    b"PHASE B RESULT: PASS",
+    b"FLEET EXEC: PASS",
+)
+
+
+class ProjectExecVerifier:
+    """Bounded invocation of the pinned project-native trusted runner.
+
+    The pinned runner owns its own dependency-acquisition and networkless
+    verification containers. This adapter only pins its bytes and image, requires
+    its published contract markers, and proves the candidate source snapshot is
+    unchanged around the call. It claims no ownership of the runner's containers.
+    """
+
+    def __init__(self, runtime):
+        self.runtime = runtime
+
+    def verify(self, state):
+        rt, p = self.runtime, self.runtime.p
+        spec = p["verification"]
+        require(p.get("schema", 1) == 2 and verification_lane(p) == "fleet_project_exec", "verification_failed")
+        require(hasattr(os, "getuid") and os.getuid() != 0, "verification_failed")
+        runner = Path(spec["runner"])
+        require(runner.is_absolute() and not runner.is_symlink(), "verification_failed")
+        require(digest(read_regular(runner, 1024 * 1024)) == spec["runner_sha256"], "verification_failed")
+        before = rt.git.capture(p)
+        require(set(rt.git.status()) == set(p["candidate_paths"]), "verification_failed")
+        inspection = run([rt.docker, "image", "inspect", "--format={{.Id}}", spec["image"]],
+                         cwd="/", env=rt.env, seconds=15)
+        require(inspection.returncode == 0 and inspection.stdout.decode().strip() == spec["image"],
+                "verification_failed")
+        action = uuid.uuid4().hex
+        evidence = Path(p["state_root"]) / ("action-" + action)
+        evidence.mkdir(mode=0o700)
+        argv = [str(runner), "--worktree", p["workspace"]]
+        for command in spec["commands"]:
+            argv += ["--verify", command]
+        result = run(argv, cwd="/", env={**rt.env, "HERMES_FLEET_EXEC_IMAGE": spec["image"]},
+                     seconds=p["resources"]["seconds"] + 10)
+        (evidence / "stdout.log").write_bytes(result.stdout)
+        (evidence / "stderr.log").write_bytes(result.stderr)
+        require(result.returncode == 0, "verification_failed")
+        for marker in PROJECT_EXEC_MARKERS:
+            require(marker in result.stdout, "verification_failed")
+        require(not (Path(p["workspace"]) / "node_modules").exists(), "verification_failed")
+        require(rt.git.capture(p) == before, "verification_failed")
+        receipt = {
+            "action": action, "lane": "fleet_project_exec", "manifest_hash": before["manifest_hash"],
+            "runner": str(runner), "runner_sha256": spec["runner_sha256"], "image": spec["image"],
+            "commands": list(spec["commands"]), "manifest_files": list(spec["manifest_files"]),
+            "registry_host": spec["registry_host"], "registry_fetch_seen": True,
+            "networkless_verification": True, "returncode": result.returncode,
+            "stdout_hash": digest(result.stdout), "stderr_hash": digest(result.stderr),
+            "resources": p["resources"], "cleanup": "runner_owned_containers_worktree_quiescent",
+        }
+        (evidence / "receipt.json").write_bytes(canonical(receipt))
+        return [receipt]
+
+
 class Runtime:
     def __init__(self, plan):
         self.plan, self.p = plan, plan.data
@@ -725,6 +788,8 @@ class Runtime:
 
     def action(self, phase, state, native):
         if phase == "verify":
+            if verification_lane(self.p) == "fleet_project_exec":
+                return ProjectExecVerifier(self).verify(state)
             return DockerVerifier(self).verify(state)
         if phase in {"precommit_review", "exact_review"}:
             from plugins.fleet_lifecycle.reviewer import Reviewer
