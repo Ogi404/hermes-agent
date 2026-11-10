@@ -62,6 +62,25 @@ Whole task body/title/provenance/project/workspace/branch/model-provider overrid
 are independently frozen and rebound before/after staged actions. Project registry
 identity, approved base and clean index/tree/modes are also rechecked.
 
+Human-readable brief binding (source-only, not activated)
+---------------------------------------------------------
+Schema-2 implementation plans may carry an optional `brief_sha256`: the SHA-256
+of the exact nonblank UTF-8 frozen description (at most 64 KiB). This opt-in keeps
+Linear's original human-readable description unchanged instead of replacing it
+with the machine scope representation. The complete producer contract hash must
+still match; project, roles, workspace, file preimages, verification and every
+other plan restriction remain mandatory. The plan's canonical digest includes
+the brief hash and complete execution scope, and the separate independently
+reviewed authenticated operational approval still binds that exact digest.
+Changing a candidate path or brief invalidates that approval. A matching brief
+hash alone never authorises admission, dispatch, review, commit or publication.
+
+Absent `brief_sha256`, exact legacy/fenced scope checks remain unchanged. The
+field is rejected for schema-1 test-only plans. This source slice does not create
+a planning service, construct an approved plan, change producer snapshots, update
+live role instructions or activate a controller. Those consumers remain separate
+operational work; this is not ordinary-task or whole-hub acceptance.
+
 Strict plan example
 -------------------
 This is a SCHEMA EXAMPLE, not an actual plan, receipt, or authorization. Zero hashes,

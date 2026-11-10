@@ -221,7 +221,10 @@ class Plan:
         keys = "schema board database task_id project_id workspace branch base contract_hash core source_sha candidate_paths test_files mutation resources profiles native state_root slack gate context commit"
         if "verification" in p:
             require(p["schema"] == 2 and isinstance(p["verification"], dict), "invalid_plan")
-        fields({key: value for key, value in p.items() if key != "verification"},
+        if "brief_sha256" in p:
+            require(p["schema"] == 2, "invalid_plan")
+            sha(p["brief_sha256"])
+        fields({key: value for key, value in p.items() if key not in {"verification", "brief_sha256"}},
                keys + (" changes" if p["schema"] == 2 else ""))
         lane = verification_lane(p)
         for key in ("database", "workspace", "core", "state_root"):
@@ -415,6 +418,17 @@ class Native:
             return prefix + "\n\n```json\n" + description + "\n```"
         return prefix + " " + description
 
+    def scope_matches(self, description):
+        if "brief_sha256" not in self.p:
+            return description in (self.scope_description(), self.scope_description(markdown=True))
+        if not isinstance(description, str) or not description.strip():
+            return False
+        try:
+            raw = description.encode("utf-8")
+        except UnicodeError:
+            return False
+        return len(raw) <= 64 * 1024 and digest(raw) == self.p["brief_sha256"]
+
     def subscription(self, conn):
         from hermes_cli.kanban_db_notify import list_notify_subs
         route = self.p["slack"]
@@ -439,7 +453,7 @@ class Native:
         require(row["project_id"] == p["project_id"] and row["workspace_kind"] == "worktree"
                 and row["workspace_path"] == p["workspace"] and row["branch_name"] == p["branch"])
         require(contract["task_lane"] == "implementation" and contract["execution_mode"] == "implement"
-                and contract["description"] in (self.scope_description(), self.scope_description(markdown=True)))
+                and self.scope_matches(contract["description"]))
         for role, lane in (("director", "orchestration"), ("builder", "implementation"), ("reviewer", "review")):
             require(p["profiles"][role]["name"] in contract[lane + "_profiles"])
         if admitted:
