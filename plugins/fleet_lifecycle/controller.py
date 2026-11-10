@@ -687,6 +687,10 @@ class Controller:
 
 def setup_cli(parser):
     actions = parser.add_subparsers(dest="action", required=True)
+    stage = actions.add_parser("stage-task")
+    stage.add_argument("--board", required=True)
+    stage.add_argument("--task", required=True)
+    stage.add_argument("--proposal", required=True, type=Path)
     for name in ("hash", "check", "prepare", "admit", "tick"):
         child = actions.add_parser(name)
         child.add_argument("--plan", required=True, type=Path)
@@ -700,6 +704,9 @@ def command(args):
         raise Halt("interrupted_action")
     signal.signal(signal.SIGTERM, interrupted)
     try:
+        if args.action == "stage-task":
+            from plugins.fleet_lifecycle.intake import stage_command
+            return stage_command(args)
         plan = Plan.load(args.plan)
         if args.action == "hash":
             print(canonical({"plan_hash": plan.digest, "approval_tests": Native.approval_tests(plan)}).decode())

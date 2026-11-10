@@ -39,10 +39,12 @@ class Result:
     stderr: bytes
 
 
-def run(argv, *, cwd, env, seconds=60, limit=MAX_OUTPUT, stdin=None, input_limit=1024 * 1024):
+def run(argv, *, cwd, env, seconds=60, limit=MAX_OUTPUT, stdin=None, input_limit=1024 * 1024, child_umask=None):
     """Bounded pipes and whole-session cleanup; never a shell."""
+    require(child_umask is None or type(child_umask) is int and child_umask == 0o022)
+    extra = {} if child_umask is None else {"umask": child_umask}
     process = subprocess.Popen(argv, cwd=cwd, env=env, stdin=subprocess.PIPE if stdin is not None else subprocess.DEVNULL,
-                               stdout=subprocess.PIPE, stderr=subprocess.PIPE, start_new_session=True)
+                               stdout=subprocess.PIPE, stderr=subprocess.PIPE, start_new_session=True, **extra)
     output = {process.stdout: bytearray(), process.stderr: bytearray()}
     deadline = time.monotonic() + seconds
     selector = selectors.DefaultSelector()
@@ -128,13 +130,14 @@ class Git:
     def __init__(self, executable, workspace, env):
         self.executable, self.workspace, self.env = executable, Path(workspace), env
 
-    def call(self, *args, ok=True, limit=MAX_OUTPUT, stdin=None):
+    def call(self, *args, ok=True, limit=MAX_OUTPUT, stdin=None, child_umask=None):
         command = [self.executable, "--no-pager", "-c", "core.hooksPath=/dev/null",
                    "-c", "core.fsmonitor=false", "-c", "core.attributesFile=/dev/null", "-c", "tar.umask=0022",
                    "-c", "protocol.allow=never", "-c", "submodule.recurse=false",
                    "-c", "diff.external=", "-c", "commit.gpgsign=false", "-c", "core.quotePath=false",
                    "-C", str(self.workspace), *args]
-        result = run(command, cwd="/", env=self.env, limit=limit, stdin=stdin)
+        extra = {} if child_umask is None else {"child_umask": child_umask}
+        result = run(command, cwd="/", env=self.env, limit=limit, stdin=stdin, **extra)
         require(not ok or result.returncode == 0)
         return result.stdout
 
@@ -627,6 +630,10 @@ class Runtime:
         safe_path(Path(director["home"]), directory=True)
 
     def identity(self):
+        self.installation_identity()
+        safe_path(Path(self.p["workspace"]), directory=True)
+
+    def installation_identity(self):
         self.principal()
         from hermes_constants import get_hermes_home
         from hermes_cli.profiles import get_active_profile_name
@@ -635,7 +642,6 @@ class Runtime:
         p = self.p
         require(Path(__file__).absolute().parent.parent.parent == Path(p["core"]))
         safe_path(Path(p["core"]), directory=True)
-        safe_path(Path(p["workspace"]), directory=True)
         require(not Path(p["core"]).is_relative_to(p["workspace"]))
         director = p["profiles"]["director"]
         require(get_hermes_home() == Path(director["home"]) and get_active_profile_name() == director["name"])
