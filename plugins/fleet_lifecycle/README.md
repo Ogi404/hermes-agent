@@ -62,6 +62,24 @@ Whole task body/title/provenance/project/workspace/branch/model-provider overrid
 are independently frozen and rebound before/after staged actions. Project registry
 identity, approved base and clean index/tree/modes are also rechecked.
 
+Read-only plan preparation (source-only)
+---------------------------------------
+`fleet-lifecycle prepare --plan <template.json> --proposal <scope.json>` reuses the
+existing CLI. The complete schema-2 template must already bind the native task,
+human brief, source, profiles, verification and platform policy. A Director scope
+proposal contains only candidate_paths, test_files and context: it cannot replace
+platform authority, commands, credentials or gate identity. Preparation validates
+the complete proposal before Git, derives existing/new file preimages from the
+pinned immutable base, and reuses the real admission preimage/mode/test checks.
+The CLI revalidates installed identity and the native held task before and after.
+It emits prepared_not_admitted, the complete plan/hash and exact approval binding;
+it does not save a ledger, edit files, request a gate, admit, claim or execute work.
+
+This removes bespoke per-task preimage assembly but does not create the platform
+template, choose a human-approved task scope, schedule the pipeline or authorise
+execution. The template/workspace and automatic Director/controller caller still
+need their operating integration; source preparation is not live acceptance.
+
 Human-readable brief binding (source-only, not activated)
 ---------------------------------------------------------
 Schema-2 implementation plans may carry an optional `brief_sha256`: the SHA-256

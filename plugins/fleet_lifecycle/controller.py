@@ -687,9 +687,11 @@ class Controller:
 
 def setup_cli(parser):
     actions = parser.add_subparsers(dest="action", required=True)
-    for name in ("hash", "check", "admit", "tick"):
+    for name in ("hash", "check", "prepare", "admit", "tick"):
         child = actions.add_parser(name)
         child.add_argument("--plan", required=True, type=Path)
+        if name == "prepare":
+            child.add_argument("--proposal", required=True, type=Path)
 
 
 def command(args):
@@ -702,6 +704,9 @@ def command(args):
         if args.action == "hash":
             print(canonical({"plan_hash": plan.digest, "approval_tests": Native.approval_tests(plan)}).decode())
             return 0
+        if args.action == "prepare":
+            from plugins.fleet_lifecycle.planning import prepare_command
+            return prepare_command(plan, args.proposal)
         from plugins.fleet_lifecycle.runtime import Runtime
         controller = Controller(plan, Runtime(plan))
         if args.action == "check":
