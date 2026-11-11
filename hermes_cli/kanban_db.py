@@ -2221,7 +2221,7 @@ def _guard_claim_snapshot(
     """
     row = conn.execute(
         "SELECT id, title, body, assignee, created_by, project_id, idempotency_key, "
-        "workspace_kind, workspace_path, branch_name FROM tasks "
+        "workspace_kind, workspace_path, branch_name, workflow_template_id FROM tasks "
         "WHERE id = ? AND status = ? AND claim_lock IS NULL",
         (task_id, source_status),
     ).fetchone()

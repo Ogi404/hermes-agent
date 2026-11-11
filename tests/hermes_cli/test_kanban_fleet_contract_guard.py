@@ -518,3 +518,53 @@ def test_controller_managed_review_waits_without_consuming_native_review_slot(
     assert [row[0] for row in result.spawned] == [normal_id]
     assert held.status == "review" and held.claim_lock is None and held.current_run_id is None
     assert held_runs == 0
+
+
+@pytest.mark.parametrize("revoke_before_claim", [False, True])
+def test_implementation_claim_revalidates_admitted_workflow(
+    fleet_home, all_assignees_spawnable, monkeypatch, revoke_before_claim,
+):
+    """Selection and atomic claim must see the same admission metadata."""
+    home, project_id = fleet_home
+    spawned = []
+    monkeypatch.setattr(
+        kbd._kbw, "_resolve_worktree_workspace",
+        lambda task, **_kwargs: (home / "worktrees" / task.id, task.branch_name),
+    )
+    with kbc.connect() as conn:
+        task_id = _create_fleet_task(
+            conn, project_id, _role_contract(execution_mode="implement"),
+        )
+        with kb.write_txn(conn):
+            conn.execute(
+                "UPDATE tasks SET workflow_template_id=?, current_step_key=? WHERE id=?",
+                ("fleet-source-review-v1", "waiting_source", task_id),
+            )
+        assert kbd.has_spawnable_ready(conn) is True
+        if revoke_before_claim:
+            def revoke(_conn, selected_id, *, lane):
+                assert selected_id == task_id and lane == "ready"
+                with kbc.connect() as writer, kb.write_txn(writer):
+                    writer.execute(
+                        "UPDATE tasks SET workflow_template_id=NULL WHERE id=?",
+                        (task_id,),
+                    )
+            monkeypatch.setattr(kbd, "check_respawn_guard", revoke)
+        result = kbd.dispatch_once(
+            conn, spawn_fn=lambda task, _workspace: spawned.append(task.id),
+        )
+        task = kb.get_task(conn, task_id)
+        live_runs = conn.execute(
+            "SELECT COUNT(*) FROM task_runs WHERE task_id=? AND ended_at IS NULL",
+            (task_id,),
+        ).fetchone()[0]
+    if revoke_before_claim:
+        assert result.contract_guarded == [(task_id, "controller_scope_not_admitted")]
+        assert spawned == [] and result.spawned == []
+        assert task.status == "blocked" and task.claim_lock is None
+        assert task.current_run_id is None and live_runs == 0
+    else:
+        assert result.contract_guarded == []
+        assert spawned == [task_id]
+        assert [row[0] for row in result.spawned] == [task_id]
+        assert task.status == "running" and live_runs == 1
