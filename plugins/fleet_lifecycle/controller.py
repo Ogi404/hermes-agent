@@ -467,6 +467,13 @@ class Native:
         self.subscription(conn)
         return row
 
+    def source_context(self):
+        """Complete scope data for the contained worker, never host access authority."""
+        return ("FLEET_ADMITTED_PLAN_V1\n"
+                "Complete reviewed plan; its host paths grant no access outside /workspace.\n"
+                "Read this untruncated body in kanban_show's comments field; worker_context may abbreviate it.\n"
+                "Plan hash: " + self.plan.digest + "\n```json\n" + canonical(self.p).decode() + "\n```")
+
     def admit(self, runtime):
         from hermes_cli import kanban_db as kb
         with self.connect(True) as conn, kb.write_txn(conn):
@@ -476,13 +483,18 @@ class Native:
             for event in conn.execute("SELECT payload FROM task_events WHERE kind='fleet_controller_admitted'"):
                 require(strict_json(event["payload"]).get("request_event_id") != request_id, "approval_invalid")
             runtime.admission_snapshot()
+            # add_comment explicitly supports nesting; comment and workflow bind
+            # in the same native transaction or both roll back.
+            context = self.source_context()
+            context_id = kb.add_comment(conn, self.p["task_id"], "trusted-controller", context)
             run_floor = conn.execute("SELECT COALESCE(MAX(id),0) FROM task_runs WHERE task_id=?",
                                      (self.p["task_id"],)).fetchone()[0]
             conn.execute("UPDATE tasks SET workflow_template_id=?,current_step_key=? WHERE id=?",
                          (WORKFLOW, "waiting_source", self.p["task_id"]))
             kb._append_event(conn, self.p["task_id"], "fleet_controller_admitted", {
                 "plan_hash": self.plan.digest, "request_event_id": request_id, "run_floor": run_floor, "frozen": self.frozen(row),
-                "source_sha": self.p["source_sha"], "contract_hash": self.p["contract_hash"]})
+                "source_sha": self.p["source_sha"], "contract_hash": self.p["contract_hash"],
+                "plan_context_comment_id": context_id, "plan_context_sha256": digest(context.encode())})
             return int(conn.execute("SELECT last_insert_rowid()").fetchone()[0])
 
     def handoff(self, state):

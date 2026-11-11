@@ -315,7 +315,18 @@ def _fleet_contract_guard_reason(
         ):
             return "project_role_permission_forbidden"
 
-    return _project_binding_reason(row, contract, schema_version)
+    reason = _project_binding_reason(row, contract, schema_version)
+    if reason is not None:
+        return reason
+    if (
+        schema_version == ROLE_CONTRACT_SCHEMA_VERSION
+        and contract["execution_mode"] == "implement"
+        and contract["task_lane"] == "implementation"
+        and dispatch_lane == "ready"
+        and _value(row, "workflow_template_id") != "fleet-source-review-v1"
+    ):
+        return "controller_scope_not_admitted"
+    return None
 
 
 def fleet_contract_guard_reason(
