@@ -108,6 +108,40 @@ def _read_source(board, task_id):
         return dict(row)
 
 
+def _prepare_source_subscription(plan, frozen):
+    """Fill only missing team metadata from the deployment-owned route."""
+    from hermes_cli import kanban_db_notify as notify
+    from plugins.fleet_lifecycle.controller import Native
+    native = Native(plan)
+    route = plan.data['slack']
+    with native.connect(True) as conn:
+        row = conn.execute('SELECT * FROM tasks WHERE id=?', (plan.data['task_id'],)).fetchone()
+        require(row is not None and Native.frozen(row) == frozen, 'identity_drift')
+        require(row['status'] in {'blocked', 'triage'} and all(row[k] is None for k in
+                ('claim_lock', 'current_run_id', 'worker_pid', 'workflow_template_id', 'current_step_key')),
+                'handoff_invalid')
+        rows = [s for s in notify.list_notify_subs(conn, plan.data['task_id'])
+                if s['platform'] == 'slack' and s['chat_id'] == route['channel']
+                and (s.get('thread_id') or '') == route['thread']]
+        require(len(rows) <= 1, 'identity_drift')
+        metadata = {}
+        if rows:
+            existing = rows[0]
+            require(existing.get('notifier_profile') == route['profile']
+                    and existing.get('delivery_mode') == 'notify', 'identity_drift')
+            metadata = existing.get('delivery_metadata') or {}
+            require(isinstance(metadata, dict)
+                    and metadata.get('slack_team_id') in (None, route['team']), 'identity_drift')
+            if metadata.get('slack_team_id') == route['team']:
+                return
+        metadata = {**metadata, 'slack_team_id':route['team']}
+        notify.add_notify_sub(conn, task_id=plan.data['task_id'], platform='slack',
+                              chat_id=route['channel'], thread_id=route['thread'],
+                              notifier_profile=route['profile'], delivery_mode='notify',
+                              chat_type=None if rows else 'channel', delivery_metadata=metadata)
+        native.subscription(conn)
+
+
 def _check_source(plan, frozen):
     from plugins.fleet_lifecycle.controller import Native
     native = Native(plan)
@@ -163,6 +197,10 @@ def _stage_new(policy, row, proposal, draft, runtime, source, target, path, ledg
     from plugins.fleet_lifecycle.controller import Halt, Native
     from plugins.fleet_lifecycle.planning import prepare_plan
     try:
+        state['intent'] = 'source_subscription'
+        ledger.save(key, state)
+        _prepare_source_subscription(draft, state['frozen'])
+        _check_source(draft, state['frozen'])
         state['intent'] = 'create_scope_gate'
         ledger.save(key, state)
         gate_id = _scope_gate(draft, state['frozen'])
@@ -211,7 +249,7 @@ def stage_task(policy, task_id, proposal, *, board, runtime_factory=None):
     runtime.principal()
     runtime.installation_identity()
     frozen = Native.frozen(row)
-    _check_source(draft, frozen)
+    require(Native.frozen(_read_source(board, task_id)) == frozen, 'identity_drift')
     project = project_policy(policy, row['branch_name'].split('/', 1)[0], board=board)
     home = Path(draft.data['profiles']['director']['home'])
     key = digest(canonical({'board':board, 'task_id':task_id}))
