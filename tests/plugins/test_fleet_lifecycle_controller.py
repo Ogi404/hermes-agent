@@ -1164,3 +1164,32 @@ def test_embedded_reviewer_large_native_binary_identity(embedded_native_helper, 
         if failure in {"oversize", "client_oversize"}:
             assert not reads
     assert not active and opened == closed
+
+
+@pytest.mark.parametrize("notifier", ["default", "director"])
+def test_plan_accepts_legacy_or_own_director_notifier(tmp_path, notifier):
+    """Keep old plans valid while supporting the isolated engineering adapter."""
+    from plugins.fleet_lifecycle.controller import Plan
+    data = plan_data(tmp_path)
+    data["slack"]["profile"] = notifier
+    Plan.validate(data)
+
+
+@pytest.mark.parametrize("notifier", ["builder", "reviewer", "seo", "other", "", None])
+def test_plan_rejects_unrelated_notification_profiles(tmp_path, notifier):
+    from plugins.fleet_lifecycle.controller import Halt, Plan
+    data = plan_data(tmp_path)
+    data["slack"]["profile"] = notifier
+    with pytest.raises(Halt):
+        Plan.validate(data)
+
+
+def test_plan_accepts_only_its_bound_director_name(tmp_path):
+    from plugins.fleet_lifecycle.controller import Halt, Plan
+    data = plan_data(tmp_path)
+    data["profiles"]["director"]["name"] = "engineering"
+    data["slack"]["profile"] = "engineering"
+    Plan.validate(data)
+    data["slack"]["profile"] = "director"
+    with pytest.raises(Halt):
+        Plan.validate(data)

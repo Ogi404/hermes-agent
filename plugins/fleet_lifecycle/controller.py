@@ -287,7 +287,8 @@ class Plan:
         require(Path(n["client"]).is_relative_to(p["profiles"]["reviewer"]["home"]), "invalid_plan")
         require(n["provider"] == "fleet-claude-cli" and n["model"] == "claude-sonnet-5", "invalid_plan")
         fields(p["slack"], "profile channel thread team")
-        require(p["slack"]["profile"] == "default", "invalid_plan")
+        require(p["slack"]["profile"] == "default"
+                or p["slack"]["profile"] == p["profiles"]["director"]["name"], "invalid_plan")
         token(p["slack"]["channel"], r"C[A-Z0-9]{1,40}")
         token(p["slack"]["team"], r"T[A-Z0-9]{1,40}")
         token(p["slack"]["thread"], r"(?:[0-9]{10}[.][0-9]{6})?")
