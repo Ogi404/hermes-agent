@@ -261,3 +261,31 @@ def test_verify_action_dispatches_lane_without_touching_python_verifier(tmp_path
     runtime.p = legacy
     runtime_module.Runtime.action(runtime, "verify", {}, None)
     assert seen == {"python": True}
+
+
+def test_project_script_lane_accepts_frontend_edit_without_invented_test_file(tmp_path):
+    p = project_plan(tmp_path)
+    p.update(candidate_paths=["src/app/page.tsx"], test_files=[],
+             changes=[{"path":"src/app/page.tsx", "base_sha256":"a"*64}],
+             context=[{"path":"src/app/page.tsx", "functions":[]}])
+    p["verification"]["commands"] = ["npm run build"]
+    before = json.loads(json.dumps(p))
+    Plan.validate(p)
+    assert p == before
+
+
+@pytest.mark.parametrize("case", ["python_lane", "empty_commands", "empty_candidates"])
+def test_empty_test_paths_do_not_disable_mandatory_verification(tmp_path, case):
+    p = project_plan(tmp_path)
+    p["test_files"] = []
+    if case == "python_lane":
+        del p["verification"]
+        p["candidate_paths"] = ["src/guard.py"]
+        p["changes"] = [{"path":"src/guard.py", "base_sha256":"a"*64}]
+    elif case == "empty_commands":
+        p["verification"]["commands"] = []
+    else:
+        p["candidate_paths"] = []
+        p["changes"] = []
+    with pytest.raises(Halt):
+        Plan.validate(p)
