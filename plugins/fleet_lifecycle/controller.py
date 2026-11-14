@@ -235,7 +235,8 @@ class Plan:
         token(p["branch"], r"[A-Za-z0-9][A-Za-z0-9_/-]{1,160}")
         sha(p["base"], 40); sha(p["source_sha"], 40); sha(p["contract_hash"])
         for key in ("candidate_paths", "test_files"):
-            require(isinstance(p[key], list) and 0 < len(p[key]) <= 24, "invalid_plan")
+            minimum = 0 if key == "test_files" and lane == "fleet_project_exec" else 1
+            require(isinstance(p[key], list) and minimum <= len(p[key]) <= 24, "invalid_plan")
             require(p[key] == sorted(set(p[key])), "invalid_plan")
             for item in p[key]:
                 relative(item)
