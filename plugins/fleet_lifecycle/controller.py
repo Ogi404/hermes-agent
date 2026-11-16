@@ -701,6 +701,9 @@ class Controller:
 
 def setup_cli(parser):
     actions = parser.add_subparsers(dest="action", required=True)
+    brief = actions.add_parser("capture-brief")
+    brief.add_argument("--project", required=True)
+    brief.add_argument("--message-ts", required=True)
     stage = actions.add_parser("stage-task")
     stage.add_argument("--board", required=True)
     stage.add_argument("--task", required=True)
@@ -718,6 +721,9 @@ def command(args):
         raise Halt("interrupted_action")
     signal.signal(signal.SIGTERM, interrupted)
     try:
+        if args.action == "capture-brief":
+            from plugins.fleet_lifecycle.brief import capture_command
+            return capture_command(args)
         if args.action == "stage-task":
             from plugins.fleet_lifecycle.intake import stage_command
             return stage_command(args)
