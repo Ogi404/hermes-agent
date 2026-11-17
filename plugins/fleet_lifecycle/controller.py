@@ -104,7 +104,8 @@ def verification_lane(p):
     if spec is None:
         return "python_testenv"
     require(p.get("schema", 1) == 2 and p["mutation"] is None, "invalid_plan")
-    fields(spec, "lane runner runner_sha256 image commands manifest_files registry_host networked_phase")
+    fields({k: v for k, v in spec.items() if k != "preview"},
+           "lane runner runner_sha256 image commands manifest_files registry_host networked_phase")
     require(spec["lane"] == "fleet_project_exec", "invalid_plan")
     absolute(spec["runner"])
     sha(spec["runner_sha256"])
@@ -120,7 +121,30 @@ def verification_lane(p):
     require({"package.json", "package-lock.json"} <= set(spec["manifest_files"]), "invalid_plan")
     token(spec["registry_host"], r"[A-Za-z0-9][A-Za-z0-9.-]{1,80}")
     require(spec["networked_phase"] == "dependency-acquisition", "invalid_plan")
+    if "preview" in spec:
+        preview_contract(p, spec["preview"])
     return "fleet_project_exec"
+
+
+def preview_contract(plan, spec):
+    fields(spec, "kind runner runner_sha256 script script_sha256 image build_root baseline baseline_sha256 expected_background_rgb")
+    require(spec["kind"] == "next_home_navigation", "invalid_plan")
+    require("npm run build" in plan["verification"]["commands"]
+            and isinstance(plan["candidate_paths"], list)
+            and "src/app/page.tsx" in plan["candidate_paths"], "invalid_plan")
+    for key in ("runner", "script", "build_root", "baseline"):
+        absolute(spec[key])
+    for key in ("runner_sha256", "script_sha256", "baseline_sha256"):
+        sha(spec[key])
+    token(spec["image"], r"sha256:[0-9a-f]{64}", 71)
+    resources = plan.get("resources")
+    require(isinstance(resources, dict)
+            and all(type(resources.get(k)) is int for k in ("memory_mb", "pids", "scratch_mb"))
+            and resources["memory_mb"] >= 5120 and resources["pids"] >= 256
+            and resources["scratch_mb"] >= 544, "invalid_plan")
+    rgb = spec["expected_background_rgb"]
+    require(isinstance(rgb, list) and len(rgb) == 3
+            and all(type(v) is int and 0 <= v <= 255 for v in rgb), "invalid_plan")
 
 
 def implementation_changes(p):
@@ -160,12 +184,14 @@ def safe_path(path, *, directory=False, private=False):
     return path
 
 
-def read_regular(path, limit=2 * 1024 * 1024):
+def read_regular(path, limit=2 * 1024 * 1024, *, owner_uid=None, forbidden_mode=0):
     path = safe_path(Path(path))
     fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
     try:
         info = os.fstat(fd)
         require(stat.S_ISREG(info.st_mode) and info.st_size <= limit)
+        require(owner_uid is None or info.st_uid == owner_uid)
+        require(not info.st_mode & forbidden_mode)
         data = os.read(fd, limit + 1)
         require(len(data) <= limit and len(data) == info.st_size)
         return data

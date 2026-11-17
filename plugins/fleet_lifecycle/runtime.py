@@ -574,18 +574,31 @@ class ProjectExecVerifier:
         runner = Path(spec["runner"])
         require(runner.is_absolute() and not runner.is_symlink(), "verification_failed")
         require(digest(read_regular(runner, 1024 * 1024)) == spec["runner_sha256"], "verification_failed")
+        preview = spec.get("preview")
+        if preview is not None:
+            from plugins.fleet_lifecycle.project_visual import preflight
+            preflight(rt, preview)
         before = rt.git.capture(p)
         require(set(rt.git.status()) == set(p["candidate_paths"]), "verification_failed")
         inspection = run([rt.docker, "image", "inspect", "--format={{.Id}}", spec["image"]],
                          cwd="/", env=rt.env, seconds=15)
         require(inspection.returncode == 0 and inspection.stdout.decode().strip() == spec["image"],
                 "verification_failed")
+        if preview is not None:
+            check = run([rt.docker, "image", "inspect", "--format={{.Id}}", preview["image"]],
+                        cwd="/", env=rt.env, seconds=15)
+            require(check.returncode == 0 and check.stdout.decode().strip() == preview["image"],
+                    "preview_identity_changed")
         action = uuid.uuid4().hex
         evidence = Path(p["state_root"]) / ("action-" + action)
         evidence.mkdir(mode=0o700)
         argv = [str(runner), "--worktree", p["workspace"]]
         for command in spec["commands"]:
             argv += ["--verify", command]
+        if preview is not None:
+            argv.append("--keep-run-dir")
+        import time
+        started = time.monotonic()
         result = run(argv, cwd="/", env={**rt.env, "HERMES_FLEET_EXEC_IMAGE": spec["image"]},
                      seconds=p["resources"]["seconds"] + 10)
         (evidence / "stdout.log").write_bytes(result.stdout)
@@ -594,6 +607,12 @@ class ProjectExecVerifier:
         for marker in PROJECT_EXEC_MARKERS:
             require(marker in result.stdout, "verification_failed")
         require(not (Path(p["workspace"]) / "node_modules").exists(), "verification_failed")
+        visual = None
+        if preview is not None:
+            from plugins.fleet_lifecycle.project_visual import consume
+            remaining = int(p["resources"]["seconds"] - (time.monotonic() - started))
+            require(remaining > 0, "preview_time_budget_exhausted")
+            visual = consume(rt, preview, evidence, result.stdout, run, seconds=min(remaining, 300))
         require(rt.git.capture(p) == before, "verification_failed")
         receipt = {
             "action": action, "lane": "fleet_project_exec", "manifest_hash": before["manifest_hash"],
@@ -604,6 +623,9 @@ class ProjectExecVerifier:
             "stdout_hash": digest(result.stdout), "stderr_hash": digest(result.stderr),
             "resources": p["resources"], "cleanup": "runner_owned_containers_worktree_quiescent",
         }
+        if visual is not None:
+            receipt["visual"] = visual
+            receipt["build_artifacts"] = "preserved_for_preview_evidence"
         (evidence / "receipt.json").write_bytes(canonical(receipt))
         return [receipt]
 
