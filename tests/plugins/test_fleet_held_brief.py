@@ -205,3 +205,142 @@ def test_other_backlog_state_cannot_certify_exact_held_state(inputs):
     with pytest.raises(Halt, match='brief_readback_invalid'):
         capture()(policy, 'fixture-app', message['ts'], read_message, wrong)
     assert [name for name, _ in calls].count('save_issue') == 1
+
+
+def test_remote_removal_of_only_trailing_lf_before_provenance_is_accepted(inputs):
+    import json
+    from pathlib import Path
+    policy, message, calls, read_message, linear, _ = inputs
+    message['text'] += '\n'
+    exact_text = message['text']
+    def normalized(name, args):
+        issue = linear(name, args)
+        if name == 'get_issue':
+            body, separator, marker = issue['description'].rpartition('\n\n<!-- fleet-brief-source:')
+            assert separator
+            issue['description'] = body.rstrip('\n') + separator + marker
+        return issue
+    result = capture()(policy, 'fixture-app', message['ts'], read_message, normalized)
+    assert result['stage'] == 'source_captured_held'
+    intent = json.loads(next(Path(policy['state_root']).glob('*/intent.json')).read_text())
+    assert intent['payload']['description'].startswith(exact_text + '\n\n<!-- fleet-brief-source:')
+    assert message['text'] == exact_text
+    assert [name for name, _ in calls].count('save_issue') == 1
+
+
+@pytest.mark.parametrize('case', ['internal_newline', 'source_space', 'marker', 'suffix'])
+def test_footer_tolerance_cannot_hide_source_or_provenance_changes(inputs, case):
+    policy, message, calls, read_message, linear, _ = inputs
+    message['text'] += '\n'
+    def altered(name, args):
+        issue = linear(name, args)
+        if name == 'get_issue':
+            body, separator, marker = issue['description'].rpartition('\n\n<!-- fleet-brief-source:')
+            body = body.rstrip('\n')
+            if case == 'internal_newline': body = body.replace('\n', '\n\n', 1)
+            elif case == 'source_space': body += ' '
+            elif case == 'marker': marker = '0' * 64 + ' -->'
+            else: marker += '\nextra'
+            issue['description'] = body + separator + marker
+        return issue
+    with pytest.raises(Halt, match='brief_readback_invalid'):
+        capture()(policy, 'fixture-app', message['ts'], read_message, altered)
+    from pathlib import Path
+    assert not list(Path(policy['state_root']).glob('*/receipt.json'))
+    assert [name for name, _ in calls].count('save_issue') == 1
+
+
+def reconciler():
+    capture()
+    from plugins.fleet_lifecycle import brief
+    assert hasattr(brief, 'reconcile_brief'), 'missing read-only existing-source reconciliation'
+    return brief.reconcile_brief
+
+
+def failed_capture(inputs):
+    policy, message, calls, read_message, linear, _ = inputs
+    message['text'] += '\n'
+    def failed_readback(name, args):
+        result = linear(name, args)
+        if name == 'get_issue': raise Halt('brief_readback_invalid')
+        return result
+    with pytest.raises(Halt, match='brief_readback_invalid'):
+        capture()(policy, 'fixture-app', message['ts'], read_message, failed_readback)
+    from pathlib import Path
+    intent = next(Path(policy['state_root']).glob('*/intent.json'))
+    assert not (intent.parent / 'receipt.json').exists()
+    return intent, intent.read_bytes()
+
+
+def test_reconcile_existing_failed_capture_is_read_only_and_preserves_original_intent(inputs):
+    reconcile = reconciler()
+    policy, message, calls, read_message, linear, _ = inputs
+    intent, before = failed_capture(inputs)
+    def readonly(name, args):
+        assert name == 'get_issue', 'reconciliation may never create/update a remote issue'
+        issue = linear(name, args)
+        body, separator, marker = issue['description'].rpartition('\n\n<!-- fleet-brief-source:')
+        issue['description'] = body.rstrip('\n') + separator + marker
+        return issue
+    result = reconcile(policy, 'fixture-app', message['ts'], 'ENS-100', read_message, readonly)
+    assert result['stage'] == 'source_reconciled_held' and result['source_write_calls'] == 0
+    assert result['issue_id'] == 'ENS-100' and result['execution_authorized'] is False
+    assert intent.read_bytes() == before
+    import json
+    receipt = json.loads((intent.parent / 'receipt.json').read_text())
+    audit = json.loads((intent.parent / 'reconciliation.json').read_text())
+    assert receipt['stage'] == 'source_captured_held'
+    assert audit['mode'] == 'existing_source_read_only' and audit['source_write_calls'] == 0
+    assert reconcile(policy, 'fixture-app', message['ts'], 'ENS-100', read_message, readonly) == result
+    assert run(inputs) == receipt
+    assert [name for name, _ in calls].count('save_issue') == 1
+
+
+def test_reconcile_requires_prior_durable_intent_without_creating_state(inputs):
+    reconcile = reconciler()
+    policy, message, calls, read_message, linear, _ = inputs
+    with pytest.raises(Halt, match='brief_reconciliation_no_intent'):
+        reconcile(policy, 'fixture-app', message['ts'], 'ENS-100', read_message, linear)
+    from pathlib import Path
+    assert calls == [] and not Path(policy['state_root']).exists()
+
+
+def test_reconcile_cannot_change_already_certified_issue_identity(inputs):
+    reconcile = reconciler()
+    receipt = run(inputs)
+    policy, message, calls, read_message, linear, _ = inputs
+    before = copy.deepcopy(calls)
+    with pytest.raises(Halt, match='brief_reconciliation_id_mismatch'):
+        reconcile(policy, 'fixture-app', message['ts'], 'ENS-101', read_message, linear)
+    assert calls == before and receipt['issue_id'] == 'ENS-100'
+
+
+@pytest.mark.parametrize('case', ['marker', 'readiness', 'other_issue'])
+def test_reconcile_rejects_mismatched_remote_scope_without_write_or_receipt(inputs, case):
+    reconcile = reconciler()
+    intent, before = failed_capture(inputs)
+    policy, message, calls, read_message, linear, _ = inputs
+    def readonly(name, args):
+        assert name == 'get_issue'
+        issue = linear(name, args)
+        if case == 'marker': issue['description'] = 'different provenance'
+        elif case == 'readiness': issue['labels'] = ['agent-ready']
+        else: issue['id'] = 'ENS-101'
+        return issue
+    with pytest.raises(Halt):
+        reconcile(policy, 'fixture-app', message['ts'], 'ENS-100', read_message, readonly)
+    assert intent.read_bytes() == before
+    assert not (intent.parent / 'receipt.json').exists()
+    assert not (intent.parent / 'reconciliation.json').exists()
+    assert [name for name, _ in calls].count('save_issue') == 1
+
+
+def test_native_cli_routes_explicit_read_only_reconciliation_without_execution_plan(monkeypatch):
+    parser = argparse.ArgumentParser();setup_cli(parser)
+    try:args = parser.parse_args(['reconcile-brief', '--project', 'fixture-app', '--message-ts', '1794656260.660269', '--issue', 'ENS-100'])
+    except SystemExit:pytest.fail('missing native reconcile-brief CLI consumer')
+    capture()
+    from plugins.fleet_lifecycle import brief
+    observed = []
+    monkeypatch.setattr(brief, 'capture_command', lambda value: observed.append((value.action, value.issue)) or 0)
+    assert command(args) == 0 and observed == [('reconcile-brief', 'ENS-100')]
