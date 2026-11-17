@@ -4,6 +4,7 @@ from __future__ import annotations
 import fcntl
 import json
 import os
+import re
 from pathlib import Path
 import stat
 
@@ -52,8 +53,14 @@ def _save(path, value):
 
 def _verify(issue, payload):
     require(isinstance(issue, dict), 'brief_readback_invalid')
-    for key in ('title', 'description'):
-        require(issue.get(key) == payload[key], 'brief_readback_invalid')
+    require(issue.get('title') == payload['title'], 'brief_readback_invalid')
+    expected = payload['description']
+    if issue.get('description') != expected:
+        # Linear can remove source-trailing LF at the provenance boundary.
+        # Never normalize interior text, spaces, marker bytes or other fields.
+        footer = re.search(r'(\n\n<!-- fleet-brief-source:[0-9a-f]{64} -->)\Z', expected)
+        require(footer is not None and issue.get('description') == expected[:footer.start()].rstrip('\n') + footer.group(0),
+                'brief_readback_invalid')
     require(issue.get('projectId') == payload['project'] and issue.get('teamId') == payload['team']
             and issue.get('status') == payload['state']
             and issue.get('statusType') == 'backlog' and issue.get('labels') == []
@@ -65,19 +72,26 @@ def _verify(issue, payload):
             'brief_readback_invalid')
 
 
-def _capture_locked(directory, source_hash, payload, call_linear):
+def _capture_locked(directory, source_hash, payload, call_linear, *, existing_issue_id=None):
     intent = directory / 'intent.json'
     receipt = directory / 'receipt.json'
+    if existing_issue_id is not None:
+        require(intent.exists(), 'brief_reconciliation_no_intent')
     if intent.exists():
         previous = strict_json(read_regular(safe_path(intent, private=True), 96 * 1024))
         require(previous['source_hash'] == source_hash, 'brief_source_changed')
         require(previous['payload'] == payload, 'brief_source_changed')
-        require(receipt.exists(), 'brief_capture_uncertain')
-        prior = strict_json(read_regular(safe_path(receipt, private=True), 96 * 1024))
-        issue_id = prior['issue_id']
+        if receipt.exists():
+            prior = strict_json(read_regular(safe_path(receipt, private=True), 96 * 1024))
+            issue_id = prior['issue_id']
+            require(existing_issue_id is None or existing_issue_id == issue_id,
+                    'brief_reconciliation_id_mismatch')
+        else:
+            require(existing_issue_id is not None, 'brief_capture_uncertain')
+            issue_id = existing_issue_id
     else:
         _save(intent, {'source_hash': source_hash, 'payload': payload})
-        # Intent is durable before the one permitted write. Never retry ambiguity.
+        # Only a fresh capture can call save_issue. Reconciliation never does.
         try:
             created = call_linear('save_issue', payload)
             require(isinstance(created, dict) and isinstance(created.get('id'), str),
@@ -90,9 +104,24 @@ def _capture_locked(directory, source_hash, payload, call_linear):
         'statusType', 'labels', 'assigneeId', 'delegateId', 'url',
     ]})
     _verify(issue, payload)
+    require(existing_issue_id is None or issue['id'] == existing_issue_id,
+            'brief_reconciliation_id_mismatch')
     result = {'stage': 'source_captured_held', 'issue_id': issue['id'],
               'linear_id': issue['uuid'], 'url': issue['url'],
               'source_hash': source_hash, 'execution_authorized': False}
+    if existing_issue_id is not None:
+        # Method evidence is not a completion marker; receipt publication below
+        # remains the success boundary. An interrupted reconciliation is read-only.
+        audit = {'mode': 'existing_source_read_only', 'issue_id': issue['id'],
+                 'linear_id': issue['uuid'], 'source_hash': source_hash,
+                 'intent_sha256': digest(read_regular(safe_path(intent, private=True), 96 * 1024)),
+                 'expected_receipt_sha256': digest(canonical(result)), 'source_write_calls': 0}
+        audit_path = directory / 'reconciliation.json'
+        if audit_path.exists():
+            require(strict_json(read_regular(safe_path(audit_path, private=True), 96 * 1024)) == audit,
+                    'brief_reconciliation_id_mismatch')
+        else:
+            _save(audit_path, audit)
     if receipt.exists():
         require(prior == result, 'brief_readback_invalid')
     else:
@@ -101,6 +130,18 @@ def _capture_locked(directory, source_hash, payload, call_linear):
 
 
 def capture_brief(policy, slug, ts, read_message, call_linear):
+    """Create one held issue; never replay a write whose result is uncertain."""
+    return _brief_operation(policy, slug, ts, read_message, call_linear)
+
+
+def reconcile_brief(policy, slug, ts, issue_id, read_message, call_linear):
+    """Verify an explicitly identified existing issue, then certify local state."""
+    token(issue_id, r'[A-Z][A-Z0-9]*-[1-9][0-9]*')
+    result = _brief_operation(policy, slug, ts, read_message, call_linear, existing_issue_id=issue_id)
+    return {**result, 'stage': 'source_reconciled_held', 'source_write_calls': 0}
+
+
+def _brief_operation(policy, slug, ts, read_message, call_linear, *, existing_issue_id=None):
     """Create one held issue from a verified human message; no caller write fields."""
     project = _project(policy, slug)
     token(ts, r'[0-9]{10,16}[.][0-9]{6}')
@@ -121,18 +162,29 @@ def capture_brief(policy, slug, ts, read_message, call_linear):
                'assignee': None, 'delegate': None}
     root = Path(policy['state_root'])
     safe_path(root.parent, directory=True, private=True)
-    root.mkdir(mode=0o700, exist_ok=True)
+    if existing_issue_id is None:
+        root.mkdir(mode=0o700, exist_ok=True)
+    else:
+        require(root.is_dir(), 'brief_reconciliation_no_intent')
     safe_path(root, directory=True, private=True)
     directory = root / key
-    directory.mkdir(mode=0o700, exist_ok=True)
+    if existing_issue_id is None:
+        directory.mkdir(mode=0o700, exist_ok=True)
+    else:
+        require(directory.is_dir(), 'brief_reconciliation_no_intent')
     safe_path(directory, directory=True, private=True)
-    fd = os.open(directory / 'capture.lock', os.O_WRONLY | os.O_CREAT | os.O_NOFOLLOW, 0o600)
+    if existing_issue_id is not None:
+        require((directory / 'intent.json').is_file(), 'brief_reconciliation_no_intent')
+    flags = os.O_WRONLY | os.O_NOFOLLOW
+    if existing_issue_id is None:
+        flags |= os.O_CREAT
+    fd = os.open(directory / 'capture.lock', flags, 0o600)
     try:
         info = os.fstat(fd)
         require(stat.S_ISREG(info.st_mode) and info.st_uid == os.getuid()
                 and stat.S_IMODE(info.st_mode) == 0o600, 'brief_lock_invalid')
         fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        return _capture_locked(directory, source_hash, payload, call_linear)
+        return _capture_locked(directory, source_hash, payload, call_linear, existing_issue_id=existing_issue_id)
     finally:
         os.close(fd)
 
@@ -180,7 +232,10 @@ def capture_command(args):
         return messages[0]
     try:
         discover_mcp_tools(allowed_mcp_names=['linear'])
-        result = capture_brief(policy, args.project, args.message_ts, read_message, _linear_call)
+        if getattr(args, 'action', 'capture-brief') == 'reconcile-brief':
+            result = reconcile_brief(policy, args.project, args.message_ts, args.issue, read_message, _linear_call)
+        else:
+            result = capture_brief(policy, args.project, args.message_ts, read_message, _linear_call)
         print(canonical(result).decode())
         return 0
     finally:
