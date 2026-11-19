@@ -65,7 +65,8 @@ def test_real_child_rejects_missing_or_blocking_source_metadata(normalizer_fixtu
  with pytest.raises(Halt):normalize_installed_source(home,policy,'hermes-agent','default',raw)
 
 
-def test_source_cli_runs_actual_capture_and_native_transaction_on_disposable_director_registry(captured_source,normalizer_fixture,monkeypatch,capsys):
+@pytest.mark.parametrize('board_layout',['default','shared'])
+def test_source_cli_runs_actual_capture_and_native_transaction_on_disposable_director_registry(captured_source,normalizer_fixture,monkeypatch,capsys,board_layout):
  import hermes_constants
  import dotenv
  from tools import mcp_tool_discovery,mcp_tool_lifecycle
@@ -87,6 +88,14 @@ def test_source_cli_runs_actual_capture_and_native_transaction_on_disposable_dir
  os.chmod(original_registry,0o644)
  database=kb.kanban_db_path(board='default')
  assert database==root/'kanban.db' and database.exists()
+ if board_layout=='shared':
+  destination=root/'kanban/boards/fixture-held/kanban.db';destination.parent.mkdir(parents=True)
+  with sqlite3.connect(database) as src,sqlite3.connect(destination) as dst:src.backup(dst)
+  os.chmod(root/'kanban',0o775);os.chmod(root/'kanban/boards',0o775);os.chmod(destination.parent,0o700)
+  database=destination
+  policy['projects'][0]['board']='fixture-held'
+  (home/'fleet-lifecycle-policy.json').write_text(json.dumps(policy))
+  assert kb.kanban_db_path(board='fixture-held')==database
  os.chmod(database,0o600)
  monkeypatch.setattr(hermes_constants,'get_hermes_home',lambda:home)
  monkeypatch.setattr(hermes_constants,'get_default_hermes_root',lambda **kw:root)
@@ -107,3 +116,28 @@ def test_source_cli_runs_actual_capture_and_native_transaction_on_disposable_dir
   row=conn.execute('SELECT status,current_run_id,worker_pid FROM tasks WHERE id=?',(result['task_id'],)).fetchone()
   assert row==('blocked',None,None)
  assert [n for n,_ in calls].count('save_issue')==1
+
+
+@pytest.mark.parametrize('case',['valid','outside_root','symlink','writable_root','readable_database','writable_database'])
+def test_private_root_native_database_boundary(normalizer_fixture,monkeypatch,case):
+ from plugins.fleet_lifecycle import held_brief
+ home,policy,raw=normalizer_fixture;root=home.parent.parent
+ database=root/'kanban/boards/fixture-boundary/kanban.db';database.parent.mkdir(parents=True)
+ database.write_bytes(b'fixture-only; path validation does not open sqlite')
+ for path in [root/'kanban',root/'kanban/boards']:os.chmod(path,0o775)
+ os.chmod(root,0o700);os.chmod(database.parent,0o700);os.chmod(database,0o600)
+ if case=='outside_root':
+  other=root.parent/'outside-board.db';other.write_bytes(b'foreign');os.chmod(other,0o600);database=other
+ elif case=='symlink':
+  target=database.with_name('real.db');database.rename(target);database.symlink_to(target)
+ elif case=='writable_root':os.chmod(root,0o775)
+ elif case=='readable_database':os.chmod(database,0o644)
+ elif case=='writable_database':os.chmod(database,0o660)
+ if case=='outside_root':monkeypatch.setattr(kb,'kanban_db_path',lambda **kw:database)
+ fn=getattr(held_brief,'private_board_database',None)
+ assert callable(fn),'missing native database private-root boundary'
+ before=database.lstat()
+ if case=='valid':assert fn(root,'fixture-boundary')==database
+ else:
+  with pytest.raises(Halt):fn(root,'fixture-boundary')
+ after=database.lstat();assert (before.st_mode,before.st_ino,before.st_uid,before.st_gid)==(after.st_mode,after.st_ino,after.st_uid,after.st_gid)
