@@ -131,6 +131,24 @@ def normalize_installed_source(home, policy, slug, board, issue):
     return strict_json(result.stdout)
 
 
+def private_board_database(root, board):
+    """Validate native layout beneath an owner-private root, not private ancestors.
+
+    Native kanban/boards directories can be group-writable. Other principals
+    cannot reach them through the required owner-only Hermes root. Keep the
+    database owner-only and reject symlinks or native overrides outside root.
+    """
+    import os
+    from hermes_cli import kanban_db as kb
+
+    root = safe_path(root, directory=True, private=True)
+    database = safe_path(kb.kanban_db_path(board=board))
+    require(database.is_relative_to(root) and database == database.resolve(), "identity_drift")
+    info = database.lstat()
+    require(info.st_uid == os.getuid() and not info.st_mode & 0o077, "identity_drift")
+    return database
+
+
 def project_command(args):
     import sqlite3
     from contextlib import closing
@@ -158,7 +176,7 @@ def project_command(args):
         rows = conn.execute('SELECT id,primary_path FROM projects WHERE slug=? AND archived=0',
                             (args.project,)).fetchall()
     require(len(rows) == 1 and rows[0][1] == selected['repository'], 'identity_drift')
-    database = safe_path(kb.kanban_db_path(board=board), private=True)
+    database = private_board_database(root, board)
     client = WebClient(token=dotenv_values(home / '.env').get('SLACK_BOT_TOKEN'), timeout=30)
     require(client.auth_test()['team_id'] == bp['team'], 'brief_workspace_invalid')
     require(policy['installation']['slack']['team'] == bp['team']
