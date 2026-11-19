@@ -205,6 +205,7 @@ def _project_binding_reason(
 
 def _fleet_contract_guard_reason(
     row: Mapping[str, Any], *, dispatch_lane: Optional[str] = None,
+    _require_ready: bool = True,
 ) -> Optional[str]:
     """Return a stable rejection code, or ``None`` when dispatch may proceed.
 
@@ -257,7 +258,7 @@ def _fleet_contract_guard_reason(
             return f"snapshot_{key}_invalid"
     if not _validate_relations(contract.get("relations")):
         return "snapshot_relations_invalid"
-    if not contract["agent_ready"]:
+    if _require_ready and not contract["agent_ready"]:
         return "snapshot_not_agent_ready"
     if contract["blocked"]:
         return "snapshot_blocked"
@@ -340,5 +341,30 @@ def fleet_contract_guard_reason(
     """
     try:
         return _fleet_contract_guard_reason(row, dispatch_lane=dispatch_lane)
+    except Exception:
+        return "snapshot_invalid"
+
+
+def fleet_contract_planning_guard_reason(row: Mapping[str, Any]) -> Optional[str]:
+    """Validate an unclaimed held fleet snapshot for planning, never dispatch.
+
+    Readiness is the only source condition deferred here. The same complete
+    contract/hash/project/role validation still runs; the ordinary dispatch
+    entry point above retains its strict readiness requirement.
+    """
+    try:
+        if _value(row, "created_by") != FLEET_CREATED_BY:
+            return "provenance_mismatch"
+        key = _value(row, "idempotency_key")
+        if not isinstance(key, str) or not key.startswith(FLEET_IDEMPOTENCY_PREFIX):
+            return "provenance_mismatch"
+        if _value(row, "status") not in {"blocked", "triage"}:
+            return "planning_task_not_held"
+        if any(_value(row, name) is not None for name in (
+            "claim_lock", "current_run_id", "worker_pid",
+            "workflow_template_id", "current_step_key",
+        )):
+            return "planning_task_owned"
+        return _fleet_contract_guard_reason(row, _require_ready=False)
     except Exception:
         return "snapshot_invalid"

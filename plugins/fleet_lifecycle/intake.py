@@ -46,6 +46,10 @@ def project_policy(policy, slug, *, board):
 
 
 def task_plan(policy, row, proposal, gate_task_id, *, board):
+    return _task_plan(policy, row, proposal, gate_task_id, board=board)
+
+
+def _task_plan(policy, row, proposal, gate_task_id, *, board, planning=False):
     """Derive a complete scoped draft; no per-task platform template is supplied."""
     from hermes_cli import kanban_db as kb
     from hermes_cli.kanban_contract_guard import _extract_contract, fleet_contract_guard_reason
@@ -58,7 +62,12 @@ def task_plan(policy, row, proposal, gate_task_id, *, board):
     require(row['created_by'] == 'fleet-linear-reconciler'
             and isinstance(row['idempotency_key'], str)
             and row['idempotency_key'].startswith('linear:'), 'identity_drift')
-    require(fleet_contract_guard_reason(row) is None, 'identity_drift')
+    if planning:
+        from hermes_cli.kanban_contract_guard import fleet_contract_planning_guard_reason
+        reason = fleet_contract_planning_guard_reason(row)
+    else:
+        reason = fleet_contract_guard_reason(row)
+    require(reason is None, 'identity_drift')
     require(row['status'] in {'blocked', 'triage'} and all(row[k] is None for k in
             ('claim_lock', 'current_run_id', 'worker_pid', 'workflow_template_id', 'current_step_key')),
             'handoff_invalid')
@@ -322,5 +331,87 @@ def stage_command(args):
     policy = strict_json(read_regular(path, 128 * 1024))
     proposal = strict_json(read_regular(Path(args.proposal), 64 * 1024))
     result = stage_task(policy, args.task, proposal, board=args.board)
+    print(canonical(result).decode())
+    return 0
+
+
+def prepare_held_scope(policy, task_id, proposal, *, board, runtime_factory=None):
+    """Read-only proposal at a frozen source; not a staged/admitted plan.
+
+    Eligibility changes the producer contract hash. The strict normal staging
+    path must therefore run afresh after an authorized eligibility refresh;
+    this envelope is never published as an executable plan or a scope gate.
+    """
+    import os
+    from plugins.fleet_lifecycle.controller import Native
+    from plugins.fleet_lifecycle.runtime import Git, Runtime
+    from plugins.fleet_lifecycle.source_selection import select_source, source_checkout, current_head
+    from plugins.fleet_lifecycle.planning import preview_reference
+    from hermes_cli.kanban_contract_guard import fleet_contract_planning_guard_reason
+    policy, proposal = copy.deepcopy(policy), copy.deepcopy(proposal)
+    token(task_id, r't_[0-9a-f]{8}')
+    row = _read_source(board, task_id)
+    placeholder = 't_00000000' if task_id != 't_00000000' else 't_ffffffff'
+    draft = _task_plan(policy, row, proposal, placeholder, board=board, planning=True)
+    native = Native(draft)
+    with native.connect() as conn:
+        require(not conn.execute('SELECT 1 FROM task_runs WHERE task_id=?', (task_id,)).fetchone(),
+                'handoff_invalid')
+        require(not conn.execute('SELECT 1 FROM task_events WHERE task_id=? AND kind=?',
+                                 (task_id, 'fleet_controller_admitted')).fetchone(), 'handoff_invalid')
+    target = Path(draft.data['workspace'])
+    saved = Path(draft.data['profiles']['director']['home']) / 'fleet-lifecycle-plans' / (task_id + '.json')
+    require(not os.path.lexists(target) and not os.path.lexists(saved), 'identity_drift')
+    runtime = (runtime_factory or Runtime)(draft)
+    runtime.principal()
+    runtime.installation_identity()
+    project = project_policy(policy, row['branch_name'].split('/', 1)[0], board=board)
+    source = Git(runtime.git_binary, project['repository'], runtime.env)
+    local_head = source.call('rev-parse', 'HEAD').decode().strip()
+    if 'source_repository' in project:
+        project['base'], local_head = select_source(project, source, runtime)
+    else:
+        require(local_head == project['base'], 'identity_drift')
+        source_checkout(source, project['source_branch'], local_head)
+    draft = _task_plan(policy, row, proposal, placeholder, board=board, planning=True)
+    prepared = copy.deepcopy(draft.data)
+    total = 0
+    for change in prepared['changes']:
+        raw = source.base_blob(prepared['base'], change['path'])
+        if raw is not None:
+            total += len(raw)
+            require(total <= 2 * 1024 * 1024, 'invalid_plan')
+            change['base_sha256'] = digest(raw)
+    for path in prepared['test_files']:
+        raw = source.base_blob(prepared['base'], path)
+        require(raw is not None or path in prepared['candidate_paths'], 'invalid_plan')
+    for context in prepared['context']:
+        raw = source.base_blob(prepared['base'], context['path'])
+        require(raw is not None and len(raw) <= 48 * 1024, 'invalid_plan')
+        if context['functions']:
+            import ast
+            tree = ast.parse(raw.decode())
+            names = {n.name for n in tree.body if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef))}
+            require(set(context['functions']) <= names, 'invalid_plan')
+    Plan.validate(prepared)
+    plan = Plan(prepared, digest(canonical(prepared)))
+    if (prepared.get('verification') or {}).get('preview') is not None:
+        preview_reference(plan, source)
+    source_checkout(source, project['source_branch'], local_head)
+    if 'source_repository' in project:
+        require(current_head(project, source, runtime) == prepared['base'], 'source_head_changed')
+    actual = _read_source(board, task_id)
+    require(actual == row and fleet_contract_planning_guard_reason(actual) is None, 'identity_drift')
+    return {'stage': 'held_scope_prepared_not_admitted', 'plan': prepared, 'plan_hash': plan.digest,
+            'execution_authorized': False, 'requires_eligibility_refresh': True}
+
+
+def held_scope_command(args):
+    from hermes_constants import get_hermes_home
+    from plugins.fleet_lifecycle.controller import read_regular, safe_path, strict_json
+    policy = strict_json(read_regular(safe_path(get_hermes_home() / 'fleet-lifecycle-policy.json', private=True),
+                                      128 * 1024))
+    proposal = strict_json(read_regular(Path(args.proposal), 64 * 1024))
+    result = prepare_held_scope(policy, args.task, proposal, board=args.board)
     print(canonical(result).decode())
     return 0
