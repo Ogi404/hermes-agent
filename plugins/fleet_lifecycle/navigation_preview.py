@@ -52,6 +52,21 @@ def rgb(value):
     return value
 
 
+def background_expectations(value):
+    """Validate task data without changing the legacy single-colour contract."""
+    if isinstance(value, list):
+        rgb(value)
+        return {scheme: {state: value for state in ('normal', 'keyboard-focus')}
+                for scheme in SCHEMES}
+    require(isinstance(value, dict) and set(value) == set(SCHEMES), 'preview_rgb_invalid')
+    for scheme in SCHEMES:
+        require(isinstance(value[scheme], dict) and set(value[scheme]) == set(STATES),
+                'preview_rgb_invalid')
+        for state in STATES:
+            rgb(value[scheme][state])
+    return value
+
+
 def luminance(value):
     values = [x / 255 for x in rgb(value)]
     linear = [x / 12.92 if x <= 0.04045 else ((x + 0.055) / 1.055) ** 2.4 for x in values]
@@ -93,7 +108,7 @@ def index_observations(data, *, require_desktop=False):
 
 def validate_observations(baseline, candidate, expected_rgb):
     before, after = index_observations(baseline), index_observations(candidate, require_desktop=True)
-    rgb(expected_rgb)
+    expected = background_expectations(expected_rgb)
     contrasts = []
     for pair, old in before.items():
         new = after[pair]
@@ -107,16 +122,20 @@ def validate_observations(baseline, candidate, expected_rgb):
             require(current['text'] == button['text'] == 'Library' and current['rect'] == button['rect'],
                     'preview_target_label_or_layout_changed')
             background, foreground = rgb(current.get('backgroundRGB')), rgb(current.get('textRGB'))
-            if pair[1] in ('normal', 'keyboard-focus'):
-                require(background == expected_rgb, 'preview_target_color_mismatch')
+            if pair[1] in expected[pair[0]]:
+                require(background == expected[pair[0]][pair[1]], 'preview_target_color_mismatch')
             a, b = luminance(background), luminance(foreground)
             ratio = (max(a, b) + 0.05) / (min(a, b) + 0.05)
             require(ratio >= 4.5, 'preview_label_unreadable')
             contrasts.append(ratio)
     for scheme in SCHEMES:
         normal, hover, pressed, focus = [after[(scheme, state)]['/library'] for state in STATES]
-        require(len({tuple(x['backgroundRGB']) for x in [normal, hover, pressed]}) == 3,
-                'preview_interaction_states_indistinct')
+        if isinstance(expected_rgb, list):
+            # Legacy pink contracts required three different interaction colours.
+            # Explicit task contracts bind each captured state instead, including
+            # intentional equality when restoring the original theme behaviour.
+            require(len({tuple(x['backgroundRGB']) for x in [normal, hover, pressed]}) == 3,
+                    'preview_interaction_states_indistinct')
         require(focus['focused'] is True and focus['focusVisible'] is True
                 and (focus['outline'] != normal['outline'] or focus['boxShadow'] != normal['boxShadow']),
                 'preview_keyboard_focus_missing')

@@ -142,9 +142,11 @@ def preview_contract(plan, spec):
             and all(type(resources.get(k)) is int for k in ("memory_mb", "pids", "scratch_mb"))
             and resources["memory_mb"] >= 5120 and resources["pids"] >= 256
             and resources["scratch_mb"] >= 544, "invalid_plan")
-    rgb = spec["expected_background_rgb"]
-    require(isinstance(rgb, list) and len(rgb) == 3
-            and all(type(v) is int and 0 <= v <= 255 for v in rgb), "invalid_plan")
+    from plugins.fleet_lifecycle.navigation_preview import PreviewError, background_expectations
+    try:
+        background_expectations(spec["expected_background_rgb"])
+    except PreviewError:
+        raise Halt("invalid_plan") from None
 
 
 def implementation_changes(p):
