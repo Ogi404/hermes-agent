@@ -383,3 +383,39 @@ unit fixtures. No whole-hub or autonomous live-handoff readiness claim follows.
 Source/profile alignment, deployment, scheduler activation, new admission, and any
 new ENS9 resumption/retry each need their own explicit review/authorization. Keep
 existing dispatcher hold, fleet guard and native reference unchanged.
+
+
+Ordinary follow-up tasks: source and preview data
+-----------------------------------------------
+A deployment-owned project entry may opt into `source_repository: "OWNER/REPO"`.
+On NEW staging only, the installed trusted caller requires that repository's exact
+HTTPS origin URL, reads the configured branch through the native GitHub CLI's fixed
+GET endpoint, and freezes the returned immutable commit into the plan. If needed,
+it fetches only that object over HTTPS using the existing native GitHub credential
+helper. It never moves an existing checkout, source branch, tracking ref or
+FETCH_HEAD. The source head is rechecked before plan publication; a moved head
+halts rather than publishing stale scope. Legacy project entries retain their
+pinned-base behavior. Existing staged/admitted plans never refresh on repetition.
+This opt-in needs the normal reviewed deployment/policy alignment; installing source
+alone does not activate it or authorize a task.
+
+A scope proposal can additionally provide a `preview` object containing ONLY
+`baseline`, `baseline_sha256`, and `expected_background_rgb`. Commands, runners,
+images, credentials, resources and network policy remain deployment-owned.
+The baseline must be a genuine trusted capture below the controller state root,
+with the exact immutable base's page-source hash and all eight observations.
+A previously verified capture may be reused only when those bindings still match;
+never synthesize evidence or relabel a historical grey baseline as current pink.
+New task reference checks occur before any native scope gate or worktree creation
+and again during exact preparation. The complete data is bound by the canonical
+plan hash and later independent scope/execution approvals.
+
+`expected_background_rgb` retains its old RGB-list form without behavior changes.
+For task-specific themes, it also accepts exactly light/dark dictionaries, each
+containing normal, hover, pressed and keyboard-focus RGB lists. Every captured
+state must equal its corresponding expectation. An explicit contract can declare
+identical interaction colours where the original application did so; the legacy
+list form still requires distinct normal/hover/pressed colours. Label contrast,
+keyboard focus, pointer capability, complete states, link/label/layout and unchanged
+neighbours remain mandatory. These data do not grant execution/publication/deploy
+authority, do not modify live policy, and do not reset any consumed task.

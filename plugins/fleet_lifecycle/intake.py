@@ -28,7 +28,10 @@ def project_policy(policy, slug, *, board):
     require(isinstance(projects, list) and 0 < len(projects) <= 32, 'invalid_plan')
     names = []
     for project in projects:
-        fields(project, PROJECT_FIELDS)
+        require(isinstance(project, dict), 'invalid_plan')
+        fields({k: v for k, v in project.items() if k != 'source_repository'}, PROJECT_FIELDS)
+        if 'source_repository' in project:
+            token(project['source_repository'], r'[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+', 180)
         token(project['slug'], r'[a-z0-9][a-z0-9_-]{0,79}')
         token(project['board'], r'[a-z0-9][a-z0-9_-]{0,79}')
         absolute(project['repository'])
@@ -73,7 +76,8 @@ def task_plan(policy, row, proposal, gate_task_id, *, board):
     require(isinstance(description, str) and bool(description.strip()), 'invalid_plan')
     raw = description.encode('utf-8')
     require(len(raw) <= 64 * 1024, 'invalid_plan')
-    fields(proposal, 'candidate_paths test_files context')
+    from plugins.fleet_lifecycle.planning import proposal_scope
+    proposal_scope(proposal)
     paths = proposal['candidate_paths']
     require(isinstance(paths, list) and 0 < len(paths) <= 24, 'invalid_plan')
     plan = copy.deepcopy(policy['installation'])
@@ -89,6 +93,8 @@ def task_plan(policy, row, proposal, gate_task_id, *, board):
                 changes=[{'path':p, 'base_sha256':None} for p in paths])
     if project['verification'] is not None:
         plan['verification'] = copy.deepcopy(project['verification'])
+    from plugins.fleet_lifecycle.planning import bind_preview
+    bind_preview(plan, proposal)
     Plan.validate(plan)
     for role,lane in [('director','orchestration'), ('builder','implementation'), ('reviewer','review')]:
         require(plan['profiles'][role]['name'] in contract[lane + '_profiles'], 'identity_drift')
@@ -215,6 +221,12 @@ def _stage_new(policy, row, proposal, draft, runtime, source, target, path, ledg
         owned.identity()
         prepared = prepare_plan(template, proposal, owned.git)
         _check_source(prepared, state['frozen'])
+        project = project_policy(policy, row['branch_name'].split('/', 1)[0], board=draft.data['board'])
+        if 'source_repository' in project:
+            from plugins.fleet_lifecycle.source_selection import current_head, source_checkout
+            source_checkout(source, project['source_branch'], state['source_checkout_head'])
+            require(current_head(project, source, runtime) == prepared.data['base'],
+                    'source_head_changed')
         state['intent'] = 'publish_plan'
         ledger.save(key, state)
         _publish_plan(prepared, path)
@@ -242,7 +254,8 @@ def stage_task(policy, task_id, proposal, *, board, runtime_factory=None):
     row = _read_source(board, task_id)
     # An unpublished syntax-check ID only; the actual gate comes from the kernel.
     temporary_gate = 't_00000000' if task_id != 't_00000000' else 't_ffffffff'
-    fields(proposal, 'candidate_paths test_files context')
+    from plugins.fleet_lifecycle.planning import proposal_scope
+    proposal_scope(proposal)
     draft = task_plan(policy, row, proposal, temporary_gate, board=board)
     from plugins.fleet_lifecycle.planning import prepare_plan
     runtime = runtime_factory(draft)
@@ -271,7 +284,17 @@ def stage_task(policy, task_id, proposal, *, board, runtime_factory=None):
             return existing['result']
         source = Git(runtime.git_binary, project['repository'], runtime.env)
         safe_path(Path(project['repository']), directory=True)
-        source.guard(project['source_branch'], project['base'])
+        selected_checkout = None
+        if 'source_repository' in project:
+            from plugins.fleet_lifecycle.source_selection import select_source
+            project['base'], selected_checkout = select_source(project, source, runtime)
+            draft = task_plan(policy, row, proposal, temporary_gate, board=board)
+        else:
+            source.guard(project['source_branch'], project['base'])
+        if 'preview' in proposal or (selected_checkout is not None
+                and (draft.data.get('verification') or {}).get('preview') is not None):
+            from plugins.fleet_lifecycle.planning import preview_reference
+            preview_reference(draft, source)
         target = Path(draft.data['workspace'])
         path = home / 'fleet-lifecycle-plans' / (task_id + '.json')
         require(not os.path.lexists(target) and not os.path.lexists(path), 'identity_drift')
@@ -283,6 +306,8 @@ def stage_task(policy, task_id, proposal, *, board, runtime_factory=None):
                 'identity_drift')
         state = {**binding, 'stage':'preparing', 'intent':None,
                  'workspace':str(target), 'branch':draft.data['branch']}
+        if selected_checkout is not None:
+            state['source_checkout_head'] = selected_checkout
         ledger.save(key, state)
         return _stage_new(policy, row, proposal, draft, runtime, source, target, path,
                           ledger, key, state, runtime_factory)
