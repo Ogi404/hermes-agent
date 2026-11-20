@@ -419,3 +419,48 @@ list form still requires distinct normal/hover/pressed colours. Label contrast,
 keyboard focus, pointer capability, complete states, link/label/layout and unchanged
 neighbours remain mandatory. These data do not grant execution/publication/deploy
 authority, do not modify live policy, and do not reset any consumed task.
+
+Held-source eligibility publication (separate approval, no execution)
+-------------------------------------------------------------------
+Two reusable operator commands bridge an already-projected, unclaimed held task
+into ordinary strict staging. They do not create another source issue or replace
+its original brief. Run them under the owning Director profile:
+
+    hermes -p director fleet-lifecycle prepare-eligibility \
+      --board <board> --task <native-task> --proposal /absolute/scope.json
+
+Preparation reads and freezes the held plan, complete native row, contract and
+installation policy. It creates a separate blocked approval carrier subscribed
+to the plan's Slack route, and returns `gate_task_id`, `source_sha` and the exact
+`proof`. Repeating unchanged preparation returns that same carrier; changed
+scope or an interrupted preparation is not silently adopted. No remote readiness
+write, staged executable plan, worktree, admission or worker is produced.
+
+After an independent scope review, the trusted caller requests a `push` gate on
+that separate carrier: `--sha` is the returned `source_sha`, `--tests` is the
+returned `proof` verbatim, and `--reviewer-verdict APPROVE` must describe a real
+independent review. Here `push` names the native approval stage for readiness
+publication, not Git publication. The approved owner must decide that exact
+request through authenticated Slack. Preparation does not request or decide it.
+
+    hermes -p director fleet-lifecycle publish-eligibility \
+      --board <board> --task <native-task>
+
+Publication revalidates the frozen scope and source, then spends the immutable
+approval once. It makes one fixed existing-issue `labels: [agent-ready]` RPC and
+at most three issue reads. No caller-supplied remote payload is accepted. All
+other observed source fields must remain identical except the actual update
+timestamp. It refreshes only the same blocked native task's producer contract
+body with a new valid hash. Status, assignments, workflow, claims and runs do not
+change. Repository identity selects the lifecycle project; producer
+`project_slug` may deliberately name a different control-plane project.
+
+An acknowledged or uncertain write is never automatically retried. A durable
+halted record, partial write or cleanup error requires reconciliation; it is not
+permission to reset the task, approval or ledger. CLI success is printed only
+after transport cleanup. `eligible_native_still_blocked` explicitly requires a
+fresh normal `stage-task` run because readiness changes the contract hash. The
+held envelope is never relabelled executable. Admission and worker execution
+remain separate reviewed, authorized stages; an implementation deferral remains
+in force. These source commands and disposable fixture tests do not establish
+installation, Director instruction reload or unattended live acceptance.
