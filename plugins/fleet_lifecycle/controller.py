@@ -740,6 +740,12 @@ def setup_cli(parser):
         stage.add_argument("--board", required=True)
         stage.add_argument("--task", required=True)
         stage.add_argument("--proposal", required=True, type=Path)
+    for action in ("prepare-eligibility", "publish-eligibility"):
+        eligibility = actions.add_parser(action)
+        eligibility.add_argument("--board", required=True)
+        eligibility.add_argument("--task", required=True)
+        if action == "prepare-eligibility":
+            eligibility.add_argument("--proposal", required=True, type=Path)
     for name in ("hash", "check", "prepare", "admit", "tick"):
         child = actions.add_parser(name)
         child.add_argument("--plan", required=True, type=Path)
@@ -753,6 +759,9 @@ def command(args):
         raise Halt("interrupted_action")
     signal.signal(signal.SIGTERM, interrupted)
     try:
+        if args.action in ("prepare-eligibility", "publish-eligibility"):
+            from plugins.fleet_lifecycle.eligibility import eligibility_command
+            return eligibility_command(args)
         if args.action == "project-brief":
             from plugins.fleet_lifecycle.held_brief import project_command
             return project_command(args)
